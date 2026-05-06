@@ -1,5 +1,18 @@
 from rest_framework import serializers
-from .models import Semester, Subject, Syllabus, Year, Question, QuestionPaper, Discussion, DiscussionReply,MockTestQuestion,MockTestResult,MockTest
+from .models import (
+    Semester,
+    Subject,
+    Syllabus,
+    Year,
+    Discussion,
+    DiscussionReply,
+    MockTest,
+    MockTestQuestion,
+    MockTestResult,
+    Question,
+    QuestionPaper,
+    QuestionSection,
+)
 
 
 class SyllabusSerializer(serializers.ModelSerializer):
@@ -9,43 +22,65 @@ class SyllabusSerializer(serializers.ModelSerializer):
 
 
 class SubjectSerializer(serializers.ModelSerializer):
-    syllabus = SyllabusSerializer(read_only=True)  # ✅ Syllabus nested inside subject
+    syllabus = SyllabusSerializer(read_only=True)
 
     class Meta:
         model = Subject
-        fields = ['id', 'name', 'semester', 'syllabus']
+        fields = ['id', 'name', 'slug', 'semester', 'syllabus']
 
 
 class SemesterSerializer(serializers.ModelSerializer):
-    subjects = SubjectSerializer(many=True, read_only=True)  # ✅ Subjects nested inside semester
+    subjects = SubjectSerializer(many=True, read_only=True)
 
     class Meta:
         model = Semester
-        fields = ['id', 'name', 'subjects']
+        fields = ['id', 'name', 'slug', 'subjects']
 
 
 class YearSerializer(serializers.ModelSerializer):
     class Meta:
         model = Year
-        fields = ['id', 'year']
+        fields = [
+            'id',
+            'year',
+            'institution',
+            'institute',
+            'level',
+            'course_code',
+            'full_marks',
+            'pass_marks',
+            'time',
+            'instructions',
+        ]
+
+
+class QuestionSectionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QuestionSection
+        fields = ['id', 'title', 'instruction', 'order']
 
 
 class QuestionSerializer(serializers.ModelSerializer):
     answer_text = serializers.SerializerMethodField()
+    section = QuestionSectionSerializer(read_only=True)
 
     class Meta:
         model = Question
-        fields = ['id', 'question_text', 'answer_text']
+        fields = [
+            'id',
+            'section',
+            'question_text',
+            'answer_text',
+            'marks',
+            'order',
+        ]
 
     def get_answer_text(self, obj):
         request = self.context.get('request')
         if request and request.user.is_authenticated:
-            try:
-                if request.user.profile.is_premium:
-                    return obj.answer_text
-            except Exception:
-                pass
-        return "🔒 Upgrade to premium to see the answer."
+            if request.user.is_premium_active():
+                return obj.answer_text
+        return "Upgrade to premium to see the answer."
 
 
 class QuestionPaperSerializer(serializers.ModelSerializer):
@@ -53,9 +88,9 @@ class QuestionPaperSerializer(serializers.ModelSerializer):
         model = QuestionPaper
         fields = ['id', 'pdf_file']
 
+
 class DiscussionReplySerializer(serializers.ModelSerializer):
     username = serializers.CharField(source='user.username', read_only=True)
-    # ✅ Recursive — replies to replies
     child_replies = serializers.SerializerMethodField()
 
     class Meta:
@@ -64,14 +99,12 @@ class DiscussionReplySerializer(serializers.ModelSerializer):
         read_only_fields = ['username', 'created_at']
 
     def get_child_replies(self, obj):
-        # ✅ Get all replies to this reply
         children = obj.child_replies.all()
         return DiscussionReplySerializer(children, many=True).data
 
 
 class DiscussionSerializer(serializers.ModelSerializer):
     username = serializers.CharField(source='user.username', read_only=True)
-    # ✅ Only top level replies (parent=None)
     replies = serializers.SerializerMethodField()
     reply_count = serializers.IntegerField(source='replies.count', read_only=True)
 
@@ -81,14 +114,22 @@ class DiscussionSerializer(serializers.ModelSerializer):
         read_only_fields = ['username', 'created_at']
 
     def get_replies(self, obj):
-        # ✅ Only get top level replies
         top_level = obj.replies.filter(parent=None)
         return DiscussionReplySerializer(top_level, many=True).data
+
+
 class MockTestQuestionSerializer(serializers.ModelSerializer):
     class Meta:
         model = MockTestQuestion
-        # ✅ Never expose correct_option to frontend
-        fields = ['id', 'question_text', 'option_a', 'option_b', 'option_c', 'option_d', 'marks']
+        fields = [
+            'id',
+            'question_text',
+            'option_a',
+            'option_b',
+            'option_c',
+            'option_d',
+            'marks',
+        ]
 
 
 class MockTestSerializer(serializers.ModelSerializer):
@@ -97,10 +138,16 @@ class MockTestSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = MockTest
-        fields = ['id', 'title', 'duration_minutes', 'total_marks', 'question_count', 'questions']
+        fields = [
+            'id',
+            'title',
+            'duration_minutes',
+            'total_marks',
+            'question_count',
+            'questions',
+        ]
 
 
-# ✅ List serializer — no questions (for listing multiple tests)
 class MockTestListSerializer(serializers.ModelSerializer):
     question_count = serializers.IntegerField(source='questions.count', read_only=True)
 

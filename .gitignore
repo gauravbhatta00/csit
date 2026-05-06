@@ -1,0 +1,70 @@
+### Python ###
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+### Distribution / packaging ###
+.Python
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+*.egg-info/
+.installed.cfg
+*.egg
+
+### Virtual environments ###
+.venv/
+venv/
+env/
+ENV/
+
+### Django ###
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+
+### Environment variables ###
+.env
+.env.*
+
+### Migrations cache / pycache ###
+*/migrations/__pycache__/
+
+### Tests / coverage ###
+.coverage
+.coverage.*
+.cache/
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+htmlcov/
+
+### Type checkers / linters ###
+.mypy_cache/
+.pyre/
+.ruff_cache/
+
+### IDEs / editors ###
+.idea/
+.vscode/
+*.swp
+*.swo
+
+### OS files ###
+.DS_Store
+Thumbs.db

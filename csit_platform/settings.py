@@ -10,15 +10,12 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
-import os
 from pathlib import Path
-from dotenv import load_dotenv
-from datetime import timedelta
+import os
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-load_dotenv()
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
@@ -29,13 +26,12 @@ SECRET_KEY = 'django-insecure-n#kco*c82mh!tzrq4yk*y!ap%vs+f-znng$dqkq^i$pz2q930_
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['*']
+ALLOWED_HOSTS = []
 
 
 # Application definition
 
 INSTALLED_APPS = [
-    'corsheaders',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -48,11 +44,9 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
     'djoser',
-    'payments',
 ]
 
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -132,27 +126,11 @@ MEDIA_ROOT = BASE_DIR / 'media'
 
 STATIC_URL = 'static/'
 AUTH_USER_MODEL = 'accounts.CustomUser'
-PASSWORD_RESET_TIMEOUT = 3600  # ✅ ADD HERE — 1 hour
-
 REST_FRAMEWORK = {
-    'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
-    ),
-    # ✅ ADD THIS — allow public access by default
-    'DEFAULT_PERMISSION_CLASSES': (
-        'rest_framework.permissions.AllowAny',
-    ),
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework_simplejwt.authentication.JWTAuthentication',  ],
 }
-EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-# EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
-EMAIL_HOST = 'smtp.gmail.com'
-EMAIL_PORT = 587
-EMAIL_USE_TLS = True
-EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER')      # your gmail
-EMAIL_HOST_PASSWORD = os.getenv('APP_PASSWORD')      # gmail app password
-DEFAULT_FROM_EMAIL = os.getenv('EMAIL_HOST_USER')
-DOMAIN = 'localhost:5173'
-SITE_NAME = 'CSIT Platform'
+
 
 DJOSER = {
     'SERIALIZERS': {
@@ -160,20 +138,6 @@ DJOSER = {
     },
     'LOGIN_FIELD': 'username',
     'USER_CREATE_PASSWORD_RETYPE': False,
-     'PERMISSIONS': {
-        'user_create': ['rest_framework.permissions.AllowAny'],
-        'activation': ['rest_framework.permissions.AllowAny'],           # ✅ ADD
-        'password_reset': ['rest_framework.permissions.AllowAny'],       # ✅ ADD
-        'password_reset_confirm': ['rest_framework.permissions.AllowAny'], # ✅ ADD
-        'username_reset': ['rest_framework.permissions.AllowAny'],
-    },
-    'PASSWORD_RESET_CONFIRM_URL': 'reset-password/{uid}/{token}',
-    'ACTIVATION_URL': 'activate/{uid}/{token}',
-
-    'SEND_ACTIVATION_EMAIL': True,
-    'SEND_PASSWORD_RESET_EMAIL': True,
-    'PASSWORD_RESET_CONFIRM_RETYPE': True,
-    'PASSWORD_RESET_SHOW_EMAIL_NOT_FOUND': True,
 }
 
 from datetime import timedelta
@@ -185,12 +149,9 @@ SIMPLE_JWT = {
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
-# Sandbox keys (for testing)
-KHALTI_SECRET_KEY = "dca250041c634fc6ba61b583000a6ad5"
-KHALTI_INITIATE_URL = "https://a.khalti.com/api/v2/epayment/initiate/"
-KHALTI_LOOKUP_URL = "https://a.khalti.com/api/v2/epayment/lookup/"
-
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-]
+KHALTI_API_BASE_URL = os.environ.get(
+    'KHALTI_API_BASE_URL',
+    'https://dev.khalti.com/api/v2',
+)
+KHALTI_SECRET_KEY = os.environ.get('KHALTI_SECRET_KEY', '')
+FRONTEND_BASE_URL = os.environ.get('FRONTEND_BASE_URL', 'http://localhost:3000')
