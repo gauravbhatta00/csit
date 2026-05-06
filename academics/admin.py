@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Semester, Subject, Syllabus, Year, Question, QuestionPaper
+from .models import Semester, Subject, Syllabus, Year, Question, QuestionPaper,MockTest, MockTestQuestion, MockTestResult,Discussion, DiscussionReply   
 
 
 @admin.register(Semester)
@@ -50,3 +50,17 @@ class QuestionPaperAdmin(admin.ModelAdmin):
     def get_year(self, obj):
         return obj.year.year
     get_year.short_description = 'Year'
+
+
+class MockTestQuestionInline(admin.TabularInline):
+    model = MockTestQuestion
+    extra = 4  # ✅ Show 4 question slots by default
+
+@admin.register(MockTest)
+class MockTestAdmin(admin.ModelAdmin):
+    list_display = ['title', 'subject', 'duration_minutes', 'total_marks', 'is_active']
+    inlines = [MockTestQuestionInline]  # ✅ Add questions directly from MockTest page
+
+@admin.register(MockTestResult)
+class MockTestResultAdmin(admin.ModelAdmin):
+    list_display = ['user', 'mock_test', 'score', 'total_marks', 'completed_at']
