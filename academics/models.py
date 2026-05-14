@@ -151,6 +151,28 @@ class MockTestResult(models.Model):
         return f"{self.user.username} - {self.mock_test.title} - {self.score}/{self.total_marks}"
 
 
+class MockTestAnswer(models.Model):
+    result = models.ForeignKey(
+        MockTestResult,
+        on_delete=models.CASCADE,
+        related_name='answers',
+    )
+    question = models.ForeignKey(
+        MockTestQuestion,
+        on_delete=models.CASCADE,
+        related_name='submitted_answers',
+    )
+    selected_option = models.CharField(max_length=1, blank=True)
+    correct_option = models.CharField(max_length=1)
+    is_correct = models.BooleanField(default=False)
+
+    class Meta:
+        unique_together = ('result', 'question')
+
+    def __str__(self):
+        return f"{self.result} - {self.question_id} - {self.selected_option or 'unanswered'}"
+
+
 class Discussion(models.Model):
     subject = models.ForeignKey(Subject, on_delete=models.CASCADE, related_name='discussions')
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)

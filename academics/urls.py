@@ -7,6 +7,7 @@ from .views import (
     SearchView,
     SemesterListView,
     SemesterSubjectListView,
+    SubjectDetailView,
     SubjectDiscussionListView,
     SubjectMockTestListView,
     SubjectSyllabusView,
@@ -20,6 +21,7 @@ from .views import (
 urlpatterns = [
     path('semesters/', SemesterListView.as_view()),
     path('semesters/<slug:semester_slug>/subjects/', SemesterSubjectListView.as_view()),
+    path('subjects/<slug:subject_slug>/', SubjectDetailView.as_view()),
     path('subjects/<slug:subject_slug>/syllabus/', SubjectSyllabusView.as_view()),
     path('subjects/<slug:subject_slug>/years/', SubjectYearListView.as_view()),
     path('subjects/<slug:subject_slug>/questions/<str:year>/', YearQuestionListView.as_view()),

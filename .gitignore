@@ -39,6 +39,7 @@ staticfiles/
 ### Environment variables ###
 .env
 .env.*
+!.env.example
 
 ### Migrations cache / pycache ###
 */migrations/__pycache__/

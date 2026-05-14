@@ -1,7 +1,11 @@
 from djoser.serializers import UserCreateSerializer
 from rest_framework import serializers
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.serializers import (
+    TokenObtainPairSerializer,
+    TokenRefreshSerializer,
+)
+from rest_framework_simplejwt.settings import api_settings
+from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 from .models import (
     CustomUser,
     Notification,
@@ -40,6 +44,17 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         data['access'] = str(access)
         data['is_premium'] = user.is_premium
 
+        return data
+
+
+class CustomTokenRefreshSerializer(TokenRefreshSerializer):
+    def validate(self, attrs):
+        refresh = RefreshToken(attrs['refresh'])
+        user_id = refresh[api_settings.USER_ID_CLAIM]
+        data = super().validate(attrs)
+        access = AccessToken(data['access'])
+
+        CustomUser.objects.filter(id=user_id).update(active_token=access['jti'])
         return data
 
 
@@ -87,6 +102,7 @@ class ProfileSerializer(serializers.ModelSerializer):
             'college',
             'semester',
             'bio',
+            'is_staff',
             'is_premium',
             'premium_expires_at',
             'current_plan',
@@ -94,6 +110,7 @@ class ProfileSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'id',
             'username',
+            'is_staff',
             'is_premium',
             'premium_expires_at',
             'current_plan',
@@ -115,7 +132,7 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
 class NotificationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Notification
-        fields = ['id', 'type', 'message', 'is_read', 'created_at']
+        fields = ['id', 'type', 'message', 'link_path', 'is_read', 'created_at']
 
 
 class KhaltiInitiateSerializer(serializers.Serializer):

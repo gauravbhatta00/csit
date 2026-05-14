@@ -7,6 +7,7 @@ from .models import (
     Discussion,
     DiscussionReply,
     MockTest,
+    MockTestAnswer,
     MockTestQuestion,
     MockTestResult,
     Question,
@@ -162,3 +163,28 @@ class MockTestResultSerializer(serializers.ModelSerializer):
     class Meta:
         model = MockTestResult
         fields = ['id', 'mock_test', 'mock_test_title', 'score', 'total_marks', 'completed_at']
+
+
+class MockTestAnswerReviewSerializer(serializers.ModelSerializer):
+    question_text = serializers.CharField(source='question.question_text', read_only=True)
+    option_a = serializers.CharField(source='question.option_a', read_only=True)
+    option_b = serializers.CharField(source='question.option_b', read_only=True)
+    option_c = serializers.CharField(source='question.option_c', read_only=True)
+    option_d = serializers.CharField(source='question.option_d', read_only=True)
+    marks = serializers.IntegerField(source='question.marks', read_only=True)
+
+    class Meta:
+        model = MockTestAnswer
+        fields = [
+            'id',
+            'question',
+            'question_text',
+            'option_a',
+            'option_b',
+            'option_c',
+            'option_d',
+            'marks',
+            'selected_option',
+            'correct_option',
+            'is_correct',
+        ]

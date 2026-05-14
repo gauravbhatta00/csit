@@ -2,10 +2,13 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.generics import ListAPIView, RetrieveAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from django.db.models import Q
+from django.shortcuts import get_object_or_404
 from .models import (
     Discussion,
     DiscussionReply,
     MockTest,
+    MockTestAnswer,
     MockTestResult,
     Semester,
     Subject,
@@ -17,6 +20,7 @@ from .models import (
 from .serializers import (
     DiscussionReplySerializer,
     DiscussionSerializer,
+    MockTestAnswerReviewSerializer,
     MockTestListSerializer,
     MockTestResultSerializer,
     MockTestSerializer,
@@ -26,6 +30,17 @@ from .serializers import (
 )
 from accounts.permissions import IsPremiumUser, IsSingleDeviceAuthenticated
 from .utils import notify_reply
+
+
+def build_slug_or_id_query(value, slug_field='slug', id_field='id'):
+    query = Q(**{slug_field: value})
+    if str(value).isdigit():
+        query |= Q(**{id_field: int(value)})
+    return query
+
+
+def get_subject_by_slug_or_id(value):
+    return get_object_or_404(Subject, build_slug_or_id_query(value))
 
 
 class SemesterListView(ListAPIView):
@@ -40,9 +55,11 @@ class SemesterSubjectListView(ListAPIView):
 
     def get_queryset(self):
         # ✅ Filter by slug instead of pk
-        return Subject.objects.filter(
-            semester__slug=self.kwargs['semester_slug']
-        ).select_related('syllabus')
+        semester_value = self.kwargs['semester_slug']
+        query = Q(semester__slug=semester_value)
+        if str(semester_value).isdigit():
+            query |= Q(semester_id=int(semester_value))
+        return Subject.objects.filter(query).select_related('syllabus')
 
 
 class SubjectSyllabusView(RetrieveAPIView):
@@ -51,7 +68,16 @@ class SubjectSyllabusView(RetrieveAPIView):
 
     def get_object(self):
         # ✅ Filter by subject slug
-        return Syllabus.objects.get(subject__slug=self.kwargs['subject_slug'])
+        subject = get_subject_by_slug_or_id(self.kwargs['subject_slug'])
+        return get_object_or_404(Syllabus, subject=subject)
+
+
+class SubjectDetailView(RetrieveAPIView):
+    permission_classes = [AllowAny]
+    serializer_class = SubjectSerializer
+
+    def get_object(self):
+        return get_subject_by_slug_or_id(self.kwargs['subject_slug'])
 
 
 class SubjectYearListView(ListAPIView):
@@ -59,7 +85,8 @@ class SubjectYearListView(ListAPIView):
     serializer_class = YearSerializer
 
     def get_queryset(self):
-        return Year.objects.filter(subject__slug=self.kwargs['subject_slug'])
+        subject = get_subject_by_slug_or_id(self.kwargs['subject_slug'])
+        return Year.objects.filter(subject=subject)
 
 
 class YearQuestionListView(ListAPIView):
@@ -67,8 +94,9 @@ class YearQuestionListView(ListAPIView):
     serializer_class = QuestionSerializer
 
     def get_queryset(self):
+        subject = get_subject_by_slug_or_id(self.kwargs['subject_slug'])
         return Question.objects.filter(
-            year__subject__slug=self.kwargs['subject_slug'],
+            year__subject=subject,
             year__year=self.kwargs['year']
         ).select_related('section')
 
@@ -81,8 +109,9 @@ class YearQuestionPaperView(RetrieveAPIView):
     serializer_class = QuestionPaperSerializer
 
     def get_object(self):
+        subject = get_subject_by_slug_or_id(self.kwargs['subject_slug'])
         return QuestionPaper.objects.get(
-            year__subject__slug=self.kwargs['subject_slug'],
+            year__subject=subject,
             year__year=self.kwargs['year']
         )
 
@@ -92,8 +121,9 @@ class SubjectMockTestListView(ListAPIView):
     serializer_class = MockTestListSerializer
 
     def get_queryset(self):
+        subject = get_subject_by_slug_or_id(self.kwargs['subject_slug'])
         return MockTest.objects.filter(
-            subject__slug=self.kwargs['subject_slug'],
+            subject=subject,
             is_active=True,
         )
 
@@ -117,9 +147,10 @@ class SubmitMockTestView(APIView):
 
         answers = request.data.get('answers', {})
         score = 0
+        questions = list(mock_test.questions.all())
 
-        for question in mock_test.questions.all():
-            submitted = answers.get(str(question.id))
+        for question in questions:
+            submitted = (answers.get(str(question.id)) or '').upper()
             if submitted and submitted.upper() == question.correct_option:
                 score += question.marks
 
@@ -129,6 +160,20 @@ class SubmitMockTestView(APIView):
             score=score,
             total_marks=mock_test.total_marks,
         )
+
+        MockTestAnswer.objects.bulk_create([
+            MockTestAnswer(
+                result=result,
+                question=question,
+                selected_option=(answers.get(str(question.id)) or '').upper(),
+                correct_option=question.correct_option,
+                is_correct=(
+                    (answers.get(str(question.id)) or '').upper()
+                    == question.correct_option
+                ),
+            )
+            for question in questions
+        ])
 
         return Response({
             'score': score,
@@ -169,6 +214,10 @@ class MockTestResultDetailView(APIView):
             'percentage': round((result.score / result.total_marks) * 100, 2)
             if result.total_marks else 0,
             'completed_at': result.completed_at,
+            'answers': MockTestAnswerReviewSerializer(
+                result.answers.select_related('question'),
+                many=True,
+            ).data,
         })
 
 
@@ -176,20 +225,14 @@ class SubjectDiscussionListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, subject_slug):
-        try:
-            subject = Subject.objects.get(slug=subject_slug)
-        except Subject.DoesNotExist:
-            return Response({'detail': 'Subject not found.'}, status=404)
+        subject = get_subject_by_slug_or_id(subject_slug)
 
         discussions = Discussion.objects.filter(subject=subject).select_related('user')
         serializer = DiscussionSerializer(discussions, many=True)
         return Response(serializer.data)
 
     def post(self, request, subject_slug):
-        try:
-            subject = Subject.objects.get(slug=subject_slug)
-        except Subject.DoesNotExist:
-            return Response({'detail': 'Subject not found.'}, status=404)
+        subject = get_subject_by_slug_or_id(subject_slug)
 
         serializer = DiscussionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -254,14 +297,14 @@ class DiscussionReplyView(APIView):
             notify_reply(
                 discussion_owner=discussion.user,
                 replier_username=request.user.username,
-                discussion_title=discussion.title,
+                discussion=discussion,
             )
 
         if parent and parent.user != request.user:
             notify_reply(
                 discussion_owner=parent.user,
                 replier_username=request.user.username,
-                discussion_title=discussion.title,
+                discussion=discussion,
             )
 
         return Response(DiscussionReplySerializer(reply).data, status=201)
@@ -291,7 +334,17 @@ class SearchView(APIView):
         ).select_related('year__subject')
 
         return Response({
-            'subjects': SubjectSerializer(subjects, many=True).data,
+            'subjects': [
+                {
+                    'id': subject.id,
+                    'name': subject.name,
+                    'slug': subject.slug,
+                    'semester': subject.semester.id,
+                    'semester_name': subject.semester.name,
+                    'semester_slug': subject.semester.slug,
+                }
+                for subject in subjects
+            ],
             'questions': [
                 {
                     'id': question.id,
@@ -299,6 +352,7 @@ class SearchView(APIView):
                     'subject': question.year.subject.name,
                     'year': question.year.year,
                     'subject_slug': question.year.subject.slug,
+                    'semester_slug': question.year.subject.semester.slug,
                 }
                 for question in questions
             ],

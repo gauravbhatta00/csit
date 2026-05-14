@@ -1,7 +1,33 @@
-from django.urls import path, include
-from rest_framework_simplejwt.views import TokenRefreshView, TokenVerifyView,TokenObtainPairView
+from django.urls import include, path
+from rest_framework_simplejwt.views import (
+    TokenObtainPairView,
+    TokenRefreshView,
+    TokenVerifyView,
+)
+
+from .serializers import CustomTokenObtainPairSerializer, CustomTokenRefreshSerializer
 from .views import (
     DeleteNotificationView,
+    AdminDashboardView,
+    AdminQuestionDetailView,
+    AdminQuestionBulkImportView,
+    AdminQuestionListView,
+    AdminSemesterListView,
+    AdminSemesterDetailView,
+    AdminDiscussionDetailView,
+    AdminDiscussionListView,
+    AdminMockTestDetailView,
+    AdminMockTestListView,
+    AdminMockTestQuestionDetailView,
+    AdminMockTestQuestionListView,
+    AdminNotificationDetailView,
+    AdminNotificationListView,
+    AdminPaymentListView,
+    AdminSubjectDetailView,
+    AdminSubjectYearListView,
+    AdminSubjectListView,
+    AdminUserDetailView,
+    AdminUserListView,
     KhaltiInitiateView,
     KhaltiVerifyView,
     LogoutView,
@@ -14,17 +40,20 @@ from .views import (
     SubscriptionPlanListView,
     UnreadNotificationCountView,
 )
-from .serializers import CustomTokenObtainPairSerializer
 
 
 class CustomTokenObtainPairView(TokenObtainPairView):
-    serializer_class = CustomTokenObtainPairSerializer  # ✅ Must point to custom serializer
+    serializer_class = CustomTokenObtainPairSerializer
+
+
+class CustomTokenRefreshView(TokenRefreshView):
+    serializer_class = CustomTokenRefreshSerializer
 
 
 urlpatterns = [
     path('', include('djoser.urls')),
-    path('jwt/create/', CustomTokenObtainPairView.as_view()),  # ✅ Custom view
-    path('jwt/refresh/', TokenRefreshView.as_view()),
+    path('jwt/create/', CustomTokenObtainPairView.as_view()),
+    path('jwt/refresh/', CustomTokenRefreshView.as_view()),
     path('jwt/verify/', TokenVerifyView.as_view()),
     path('logout/', LogoutView.as_view()),
     path('profile/', ProfileView.as_view()),
@@ -38,4 +67,24 @@ urlpatterns = [
     path('notifications/mark-all-read/', MarkAllNotificationsReadView.as_view()),
     path('notifications/<int:pk>/read/', MarkNotificationReadView.as_view()),
     path('notifications/<int:pk>/', DeleteNotificationView.as_view()),
+    path('admin/dashboard/', AdminDashboardView.as_view()),
+    path('admin/semesters/', AdminSemesterListView.as_view()),
+    path('admin/semesters/<int:pk>/', AdminSemesterDetailView.as_view()),
+    path('admin/subjects/', AdminSubjectListView.as_view()),
+    path('admin/subjects/<int:pk>/', AdminSubjectDetailView.as_view()),
+    path('admin/subjects/<int:pk>/years/', AdminSubjectYearListView.as_view()),
+    path('admin/questions/', AdminQuestionListView.as_view()),
+    path('admin/questions/bulk-import/', AdminQuestionBulkImportView.as_view()),
+    path('admin/questions/<int:pk>/', AdminQuestionDetailView.as_view()),
+    path('admin/users/', AdminUserListView.as_view()),
+    path('admin/users/<int:pk>/', AdminUserDetailView.as_view()),
+    path('admin/payments/', AdminPaymentListView.as_view()),
+    path('admin/discussions/', AdminDiscussionListView.as_view()),
+    path('admin/discussions/<int:pk>/', AdminDiscussionDetailView.as_view()),
+    path('admin/notifications/', AdminNotificationListView.as_view()),
+    path('admin/notifications/<int:pk>/', AdminNotificationDetailView.as_view()),
+    path('admin/mock-tests/', AdminMockTestListView.as_view()),
+    path('admin/mock-tests/<int:pk>/', AdminMockTestDetailView.as_view()),
+    path('admin/mock-tests/<int:pk>/questions/', AdminMockTestQuestionListView.as_view()),
+    path('admin/mock-test-questions/<int:pk>/', AdminMockTestQuestionDetailView.as_view()),
 ]

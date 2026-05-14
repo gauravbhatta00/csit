@@ -161,5 +161,6 @@ def activate_subscription(payment):
         user=user,
         type=Notification.TYPE_PAYMENT,
         message=f"{payment.plan.name} subscription activated.",
+        link_path="/profile",
     )
     return subscription
