@@ -11,6 +11,7 @@ from .models import (
     MockTestQuestion,
     MockTestResult,
     Question,
+    AnswerContribution,
     QuestionPaper,
     QuestionSection,
 )
@@ -62,8 +63,8 @@ class QuestionSectionSerializer(serializers.ModelSerializer):
 
 
 class QuestionSerializer(serializers.ModelSerializer):
-    answer_text = serializers.SerializerMethodField()
     section = QuestionSectionSerializer(read_only=True)
+    approved_contributions = serializers.SerializerMethodField()
 
     class Meta:
         model = Question
@@ -74,15 +75,32 @@ class QuestionSerializer(serializers.ModelSerializer):
             'answer_text',
             'marks',
             'order',
+            'approved_contributions',
         ]
 
-    def get_answer_text(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            if request.user.is_premium_active():
-                return obj.answer_text
-        return "Upgrade to premium to see the answer."
+    def get_approved_contributions(self, obj):
+        contributions = getattr(obj, 'approved_contributions_cache', None)
+        if contributions is None:
+            contributions = obj.contributions.filter(
+                status=AnswerContribution.STATUS_APPROVED,
+            ).select_related('user')
+        return ApprovedAnswerContributionSerializer(contributions, many=True).data
 
+
+class ApprovedAnswerContributionSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source='user.username', read_only=True)
+
+    class Meta:
+        model = AnswerContribution
+        fields = ['id', 'username', 'answer_text', 'image', 'created_at']
+
+
+class AnswerContributionSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source='user.username', read_only=True)
+
+    class Meta:
+        model = AnswerContribution
+        fields = ['id', 'username', 'answer_text', 'image', 'status', 'created_at']
 
 class QuestionPaperSerializer(serializers.ModelSerializer):
     class Meta:

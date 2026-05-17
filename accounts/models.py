@@ -196,6 +196,33 @@ class PaymentTransaction(models.Model):
         return f"{self.user.username} - {self.plan.name} - {self.status}"
 
 
+class ContactMessage(models.Model):
+    name = models.CharField(max_length=120)
+    email = models.EmailField()
+    message = models.TextField()
+    is_resolved = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.name} - {self.email}"
+
+
+class EmailSubscription(models.Model):
+    email = models.EmailField(unique=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.email
+
+
 class Notification(models.Model):
     TYPE_REPLY = 'reply'
     TYPE_PAPER = 'paper'

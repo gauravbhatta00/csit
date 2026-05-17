@@ -1,12 +1,15 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.generics import ListAPIView, RetrieveAPIView
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
-from django.db.models import Q
+from PIL import Image, UnidentifiedImageError
+from django.db.models import Prefetch, Q
 from django.shortcuts import get_object_or_404
 from .models import (
     Discussion,
     DiscussionReply,
+    AnswerContribution,
     MockTest,
     MockTestAnswer,
     MockTestResult,
@@ -20,6 +23,7 @@ from .models import (
 from .serializers import (
     DiscussionReplySerializer,
     DiscussionSerializer,
+    AnswerContributionSerializer,
     MockTestAnswerReviewSerializer,
     MockTestListSerializer,
     MockTestResultSerializer,
@@ -98,7 +102,15 @@ class YearQuestionListView(ListAPIView):
         return Question.objects.filter(
             year__subject=subject,
             year__year=self.kwargs['year']
-        ).select_related('section')
+        ).select_related('section').prefetch_related(
+            Prefetch(
+                'contributions',
+                queryset=AnswerContribution.objects.filter(
+                    status=AnswerContribution.STATUS_APPROVED,
+                ).select_related('user'),
+                to_attr='approved_contributions_cache',
+            )
+        )
 
     def get_serializer_context(self):
         return {'request': self.request}
@@ -113,6 +125,54 @@ class YearQuestionPaperView(RetrieveAPIView):
         return QuestionPaper.objects.get(
             year__subject=subject,
             year__year=self.kwargs['year']
+        )
+
+
+class QuestionContributionListView(APIView):
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsAuthenticated()]
+        return [AllowAny()]
+
+    def get_question(self, pk):
+        return get_object_or_404(Question, pk=pk)
+
+    def get(self, request, pk):
+        question = self.get_question(pk)
+        contributions = question.contributions.filter(
+            status=AnswerContribution.STATUS_APPROVED,
+        ).select_related('user')
+        return Response(AnswerContributionSerializer(contributions, many=True).data)
+
+    def post(self, request, pk):
+        question = self.get_question(pk)
+        answer_text = (request.data.get('answer_text') or '').strip()
+        image = request.FILES.get('image')
+
+        if not answer_text and not image:
+            return Response(
+                {'detail': 'Answer text or image is required.'},
+                status=400,
+            )
+
+        if image:
+            try:
+                Image.open(image).verify()
+                image.seek(0)
+            except (OSError, UnidentifiedImageError):
+                return Response({'detail': 'Upload a valid image file.'}, status=400)
+
+        contribution = AnswerContribution.objects.create(
+            question=question,
+            user=request.user,
+            answer_text=answer_text,
+            image=image,
+        )
+        return Response(
+            AnswerContributionSerializer(contribution).data,
+            status=201,
         )
 
 

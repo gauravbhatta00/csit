@@ -14,6 +14,7 @@ from .views import (
     SubjectYearListView,
     SubmitMockTestView,
     UserMockTestResultListView,
+    QuestionContributionListView,
     YearQuestionListView,
     YearQuestionPaperView,
 )
@@ -25,6 +26,7 @@ urlpatterns = [
     path('subjects/<slug:subject_slug>/syllabus/', SubjectSyllabusView.as_view()),
     path('subjects/<slug:subject_slug>/years/', SubjectYearListView.as_view()),
     path('subjects/<slug:subject_slug>/questions/<str:year>/', YearQuestionListView.as_view()),
+    path('questions/<int:pk>/contributions/', QuestionContributionListView.as_view()),
     path('subjects/<slug:subject_slug>/papers/<str:year>/', YearQuestionPaperView.as_view()),
     path('subjects/<slug:subject_slug>/mock-tests/', SubjectMockTestListView.as_view()),
     path('mock-tests/<int:pk>/', MockTestDetailView.as_view()),

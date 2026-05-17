@@ -1,6 +1,10 @@
 import csv
 import io
 
+from django.conf import settings
+from django.contrib.auth import get_user_model
+from django.contrib.auth.tokens import default_token_generator
+from django.core.mail import send_mail
 from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView, RetrieveAPIView
 from rest_framework.response import Response
@@ -14,10 +18,13 @@ from django.db.models import Avg, Count, Sum
 from django.db.models.functions import TruncDate
 from django.utils.crypto import get_random_string
 from django.utils import timezone
+from django.utils.encoding import force_bytes, force_str
+from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from django.utils.text import slugify
 from academics.models import (
     Discussion,
     DiscussionReply,
+    AnswerContribution,
     MockTest,
     MockTestQuestion,
     MockTestResult,
@@ -30,15 +37,22 @@ from academics.models import (
     Year,
 )
 from .models import (
+    ContactMessage,
+    EmailSubscription,
     Notification,
     PaymentTransaction,
     SubscriptionPlan,
     UserSubscription,
 )
 from .serializers import (
+    ContactMessageSerializer,
+    EmailSubscriptionSerializer,
+    GoogleLoginSerializer,
     KhaltiInitiateSerializer,
     KhaltiVerifySerializer,
     NotificationSerializer,
+    PasswordResetConfirmSerializer,
+    PasswordResetRequestSerializer,
     PaymentTransactionSerializer,
     ProfileSerializer,
     ProfileUpdateSerializer,
@@ -48,9 +62,14 @@ from .serializers import (
 from .services import (
     KhaltiConfigurationError,
     KhaltiPaymentError,
+    GoogleAuthConfigurationError,
+    GoogleAuthError,
     apply_khalti_lookup,
+    build_login_response,
+    build_unique_username,
     initiate_khalti_payment,
     lookup_khalti_payment,
+    verify_google_id_token,
 )
 
 
@@ -92,6 +111,96 @@ class ProfileView(APIView):
         )
 
 
+class PasswordResetRequestView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = PasswordResetRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data['email']
+        User = get_user_model()
+        user = User.objects.filter(email__iexact=email).first()
+
+        if user:
+            uid = urlsafe_base64_encode(force_bytes(user.pk))
+            token = default_token_generator.make_token(user)
+            reset_url = (
+                f"{settings.FRONTEND_BASE_URL.rstrip('/')}/reset-password"
+                f"?uid={uid}&token={token}"
+            )
+            send_mail(
+                subject='Reset your Sabaiko CSIT password',
+                message=(
+                    "Use this link to reset your Sabaiko CSIT password:\n\n"
+                    f"{reset_url}\n\n"
+                    "If you did not request this, you can ignore this email."
+                ),
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[user.email],
+                fail_silently=True,
+            )
+
+        return Response({
+            'detail': 'If an account exists for that email, a reset link has been sent.'
+        })
+
+
+class PasswordResetConfirmView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = PasswordResetConfirmSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        User = get_user_model()
+
+        try:
+            user_id = force_str(urlsafe_base64_decode(data['uid']))
+            user = User.objects.get(pk=user_id)
+        except (TypeError, ValueError, OverflowError, User.DoesNotExist):
+            return Response({'detail': 'Password reset link is invalid.'}, status=400)
+
+        if not default_token_generator.check_token(user, data['token']):
+            return Response({'detail': 'Password reset link is invalid or expired.'}, status=400)
+
+        user.set_password(data['password'])
+        user.active_token = None
+        user.save(update_fields=['password', 'active_token'])
+        return Response({'detail': 'Password has been reset.'})
+
+
+class GoogleLoginView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = GoogleLoginSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            google_user = verify_google_id_token(
+                serializer.validated_data['credential']
+            )
+        except GoogleAuthConfigurationError as exc:
+            return Response({'detail': str(exc)}, status=500)
+        except GoogleAuthError as exc:
+            return Response({'detail': str(exc)}, status=400)
+
+        email = google_user['email'].strip().lower()
+        User = get_user_model()
+        user = User.objects.filter(email__iexact=email).first()
+
+        if not user:
+            user = User.objects.create_user(
+                username=build_unique_username(email),
+                email=email,
+                password=None,
+            )
+            user.set_unusable_password()
+            user.save(update_fields=['password'])
+
+        return Response(build_login_response(user))
+
+
 class SubscriptionPlanListView(ListAPIView):
     permission_classes = [AllowAny]
     serializer_class = SubscriptionPlanSerializer
@@ -107,6 +216,33 @@ class SubscriptionPlanDetailView(RetrieveAPIView):
 
     def get_queryset(self):
         return SubscriptionPlan.objects.filter(is_active=True)
+
+
+class ContactMessageCreateView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = ContactMessageSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        message = serializer.save()
+        return Response(ContactMessageSerializer(message).data, status=201)
+
+
+class EmailSubscriptionCreateView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = EmailSubscriptionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        subscription, created = EmailSubscription.objects.update_or_create(
+            email=serializer.validated_data['email'],
+            defaults={'is_active': True},
+        )
+        status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return Response(
+            EmailSubscriptionSerializer(subscription).data,
+            status=status_code,
+        )
 
 
 class MySubscriptionListView(ListAPIView):
@@ -960,6 +1096,94 @@ class AdminQuestionBulkImportView(APIView):
             'questions': imported,
             'errors': errors,
         })
+
+
+class AdminAnswerContributionListView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def serialize_contribution(self, contribution):
+        return {
+            'id': contribution.id,
+            'question_id': contribution.question_id,
+            'question_text': contribution.question.question_text,
+            'subject': contribution.question.year.subject.name,
+            'subject_slug': contribution.question.year.subject.slug,
+            'semester': contribution.question.year.subject.semester.name,
+            'year': contribution.question.year.year,
+            'username': contribution.user.username,
+            'answer_text': contribution.answer_text,
+            'image': contribution.image.url if contribution.image else '',
+            'status': contribution.status,
+            'reviewed_by': (
+                contribution.reviewed_by.username
+                if contribution.reviewed_by
+                else ''
+            ),
+            'reviewed_at': contribution.reviewed_at,
+            'created_at': contribution.created_at,
+        }
+
+    def get_queryset(self):
+        return AnswerContribution.objects.select_related(
+            'question',
+            'question__year',
+            'question__year__subject',
+            'question__year__subject__semester',
+            'user',
+            'reviewed_by',
+        )
+
+    def get(self, request):
+        contributions = self.get_queryset()
+        status_filter = (request.query_params.get('status') or '').strip()
+
+        if status_filter:
+            contributions = contributions.filter(status=status_filter)
+
+        return Response([
+            self.serialize_contribution(contribution)
+            for contribution in contributions[:250]
+        ])
+
+
+class AdminAnswerContributionDetailView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def patch(self, request, pk):
+        contribution = get_object_or_404(AnswerContribution, pk=pk)
+        status_value = (request.data.get('status') or '').strip()
+        valid_statuses = {
+            AnswerContribution.STATUS_PENDING,
+            AnswerContribution.STATUS_APPROVED,
+            AnswerContribution.STATUS_REJECTED,
+        }
+
+        if status_value not in valid_statuses:
+            return Response({'detail': 'A valid status is required.'}, status=400)
+
+        contribution.status = status_value
+        if status_value == AnswerContribution.STATUS_PENDING:
+            contribution.reviewed_by = None
+            contribution.reviewed_at = None
+        else:
+            contribution.reviewed_by = request.user
+            contribution.reviewed_at = timezone.now()
+        contribution.save(
+            update_fields=[
+                'status',
+                'reviewed_by',
+                'reviewed_at',
+                'updated_at',
+            ]
+        )
+        contribution = AdminAnswerContributionListView().get_queryset().get(
+            pk=contribution.pk,
+        )
+        return Response(
+            AdminAnswerContributionListView().serialize_contribution(
+                contribution,
+            )
+        )
 
 
 class AdminUserListView(APIView):

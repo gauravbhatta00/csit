@@ -7,7 +7,9 @@ from rest_framework_simplejwt.serializers import (
 from rest_framework_simplejwt.settings import api_settings
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 from .models import (
+    ContactMessage,
     CustomUser,
+    EmailSubscription,
     Notification,
     PaymentTransaction,
     SubscriptionPlan,
@@ -174,3 +176,50 @@ class PaymentTransactionSerializer(serializers.ModelSerializer):
             'updated_at',
             'completed_at',
         ]
+
+
+class ContactMessageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ContactMessage
+        fields = ['id', 'name', 'email', 'message', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+    def validate_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Name is required.")
+        return value
+
+    def validate_message(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Message is required.")
+        return value
+
+
+class EmailSubscriptionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EmailSubscription
+        fields = ['id', 'email', 'is_active', 'created_at']
+        read_only_fields = ['id', 'is_active', 'created_at']
+        extra_kwargs = {'email': {'validators': []}}
+
+    def validate_email(self, value):
+        return value.strip().lower()
+
+
+class PasswordResetRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+    def validate_email(self, value):
+        return value.strip().lower()
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    uid = serializers.CharField()
+    token = serializers.CharField()
+    password = serializers.CharField(min_length=8, write_only=True)
+
+
+class GoogleLoginSerializer(serializers.Serializer):
+    credential = serializers.CharField()

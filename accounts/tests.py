@@ -1,9 +1,18 @@
+from unittest.mock import Mock, patch
+
 from django.contrib.auth import get_user_model
+from django.contrib.auth.tokens import default_token_generator
+from django.core import mail
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import override_settings
+from django.utils.encoding import force_bytes
+from django.utils.http import urlsafe_base64_encode
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import AccessToken
 
+from academics.models import AnswerContribution, Question, Semester, Subject, Year
+from .models import ContactMessage, EmailSubscription
 
 User = get_user_model()
 
@@ -210,3 +219,164 @@ class AuthApiTests(APITestCase):
         self.assertEqual(response.data['imported_count'], 1)
         self.assertEqual(response.data['questions'][0]['subject'], 'Computer Architecture')
         self.assertIn('Cache memory', response.data['questions'][0]['answer_text'])
+
+    def test_staff_user_can_approve_answer_contribution(self):
+        staff = User.objects.create_user(
+            username='review-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        student = User.objects.create_user(
+            username='answer-helper',
+            password='pass12345',
+        )
+        semester = Semester.objects.create(name='Semester 2')
+        subject = Subject.objects.create(semester=semester, name='Discrete Structure')
+        year = Year.objects.create(subject=subject, year='2081')
+        question = Question.objects.create(
+            year=year,
+            question_text='Define graph.',
+            answer_text='A graph has vertices and edges.',
+        )
+        contribution = AnswerContribution.objects.create(
+            question=question,
+            user=student,
+            answer_text='A graph is an ordered pair of vertices and edges.',
+        )
+        self.client.force_authenticate(user=staff)
+
+        response = self.client.patch(
+            f'/api/accounts/admin/answer-contributions/{contribution.id}/',
+            {'status': AnswerContribution.STATUS_APPROVED},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], AnswerContribution.STATUS_APPROVED)
+        self.assertEqual(response.data['image'], '')
+        contribution.refresh_from_db()
+        self.assertEqual(contribution.reviewed_by, staff)
+        self.assertIsNotNone(contribution.reviewed_at)
+
+    def test_contact_message_can_be_submitted_without_login(self):
+        response = self.client.post(
+            '/api/accounts/contact/',
+            {
+                'name': 'Student User',
+                'email': 'student@example.com',
+                'message': 'Please add more resources for statistics.',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(ContactMessage.objects.count(), 1)
+        message = ContactMessage.objects.get()
+        self.assertEqual(message.name, 'Student User')
+        self.assertEqual(message.email, 'student@example.com')
+
+    def test_email_subscription_can_be_submitted_without_login(self):
+        response = self.client.post(
+            '/api/accounts/email-subscriptions/',
+            {'email': 'STUDENT@example.com'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(EmailSubscription.objects.count(), 1)
+        self.assertEqual(
+            EmailSubscription.objects.get().email,
+            'student@example.com',
+        )
+
+    def test_duplicate_email_subscription_is_idempotent(self):
+        EmailSubscription.objects.create(
+            email='student@example.com',
+            is_active=False,
+        )
+
+        response = self.client.post(
+            '/api/accounts/email-subscriptions/',
+            {'email': 'student@example.com'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(EmailSubscription.objects.count(), 1)
+        self.assertTrue(EmailSubscription.objects.get().is_active)
+
+    @override_settings(
+        EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
+        FRONTEND_BASE_URL='http://localhost:3000',
+    )
+    def test_password_reset_request_sends_email_without_login(self):
+        response = self.client.post(
+            '/api/accounts/password-reset/',
+            {'email': 'student@example.com'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn('/reset-password?', mail.outbox[0].body)
+
+    def test_password_reset_confirm_updates_password(self):
+        uid = urlsafe_base64_encode(force_bytes(self.user.pk))
+        token = default_token_generator.make_token(self.user)
+
+        response = self.client.post(
+            '/api/accounts/password-reset/confirm/',
+            {
+                'uid': uid,
+                'token': token,
+                'password': 'newpass12345',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password('newpass12345'))
+        self.assertIsNone(self.user.active_token)
+
+    @override_settings(GOOGLE_CLIENT_ID='google-client-id')
+    @patch('accounts.services.requests.get')
+    def test_google_login_creates_user_and_returns_tokens(self, mocked_get):
+        mocked_response = Mock()
+        mocked_response.status_code = 200
+        mocked_response.json.return_value = {
+            'aud': 'google-client-id',
+            'email': 'GoogleUser@example.com',
+            'email_verified': 'true',
+        }
+        mocked_get.return_value = mocked_response
+
+        response = self.client.post(
+            '/api/accounts/google/',
+            {'credential': 'valid-google-token'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('access', response.data)
+        self.assertTrue(User.objects.filter(email='googleuser@example.com').exists())
+
+    @override_settings(GOOGLE_CLIENT_ID='google-client-id')
+    @patch('accounts.services.requests.get')
+    def test_google_login_rejects_invalid_audience(self, mocked_get):
+        mocked_response = Mock()
+        mocked_response.status_code = 200
+        mocked_response.json.return_value = {
+            'aud': 'other-client-id',
+            'email': 'student@example.com',
+            'email_verified': 'true',
+        }
+        mocked_get.return_value = mocked_response
+
+        response = self.client.post(
+            '/api/accounts/google/',
+            {'credential': 'invalid-google-token'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)

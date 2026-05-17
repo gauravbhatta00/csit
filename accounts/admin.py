@@ -1,7 +1,9 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 from .models import (
+    ContactMessage,
     CustomUser,
+    EmailSubscription,
     Notification,
     PaymentTransaction,
     SubscriptionPlan,
@@ -80,6 +82,26 @@ class PaymentTransactionAdmin(admin.ModelAdmin):
         'completed_at',
     ]
     autocomplete_fields = ['user', 'plan', 'subscription']
+    date_hierarchy = 'created_at'
+
+
+@admin.register(ContactMessage)
+class ContactMessageAdmin(admin.ModelAdmin):
+    list_display = ['name', 'email', 'is_resolved', 'created_at']
+    list_filter = ['is_resolved']
+    search_fields = ['name', 'email', 'message']
+    list_editable = ['is_resolved']
+    readonly_fields = ['created_at']
+    date_hierarchy = 'created_at'
+
+
+@admin.register(EmailSubscription)
+class EmailSubscriptionAdmin(admin.ModelAdmin):
+    list_display = ['email', 'is_active', 'created_at', 'updated_at']
+    list_filter = ['is_active']
+    search_fields = ['email']
+    list_editable = ['is_active']
+    readonly_fields = ['created_at', 'updated_at']
     date_hierarchy = 'created_at'
 
 

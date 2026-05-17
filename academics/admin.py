@@ -5,6 +5,7 @@ from .models import (
     MockTest,
     MockTestQuestion,
     MockTestResult,
+    AnswerContribution,
     Semester,
     Subject,
     Syllabus,
@@ -85,6 +86,22 @@ class QuestionAdmin(admin.ModelAdmin):
     def get_year(self, obj):
         return obj.year.year
     get_year.short_description = 'Year'
+
+
+@admin.register(AnswerContribution)
+class AnswerContributionAdmin(admin.ModelAdmin):
+    list_display = [
+        'question',
+        'user',
+        'image',
+        'status',
+        'reviewed_by',
+        'created_at',
+        'reviewed_at',
+    ]
+    list_filter = ['status', 'question__year__subject__semester', 'question__year__subject']
+    search_fields = ['answer_text', 'user__username', 'question__question_text']
+    readonly_fields = ['created_at', 'updated_at', 'reviewed_at']
 
 
 @admin.register(QuestionPaper)

@@ -1,5 +1,4 @@
 from rest_framework.permissions import BasePermission
-from django.utils import timezone
 
 
 class IsPremiumUser(BasePermission):
@@ -18,11 +17,6 @@ class IsSingleDeviceAuthenticated(BasePermission):
         if not request.user or not request.user.is_authenticated:
             return False
         try:
-            # ✅ request.auth is the ACCESS token — get its jti
-            jti = request.auth['jti']
-            print(f"DEBUG request jti: {jti}")
-            print(f"DEBUG stored jti:  {request.user.active_token}")
-            return jti == request.user.active_token
-        except Exception as e:
-            print(f"DEBUG permission error: {e}")
+            return request.auth["jti"] == request.user.active_token
+        except (KeyError, TypeError):
             return False

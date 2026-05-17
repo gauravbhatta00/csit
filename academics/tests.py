@@ -1,10 +1,12 @@
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from accounts.models import Notification
 from .models import (
     Discussion,
+    AnswerContribution,
     MockTest,
     MockTestAnswer,
     MockTestQuestion,
@@ -28,7 +30,7 @@ class AcademicApiTests(APITestCase):
         )
         self.year = Year.objects.create(subject=self.subject, year='2080')
 
-    def test_question_answers_are_hidden_for_free_users(self):
+    def test_question_answers_are_visible_without_login(self):
         Question.objects.create(
             year=self.year,
             question_text='Define mean.',
@@ -41,21 +43,26 @@ class AcademicApiTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(
-            response.data[0]['answer_text'],
-            'Upgrade to premium to see the answer.',
-        )
+        self.assertEqual(response.data[0]['answer_text'], 'Mean is the arithmetic average.')
 
-    def test_question_answers_are_visible_for_premium_users(self):
-        user = User.objects.create_user(username='premium', password='pass12345')
-        user.is_premium = True
-        user.save(update_fields=['is_premium'])
-        self.client.force_authenticate(user=user)
-        Question.objects.create(
+    def test_only_approved_contributions_are_visible_with_questions(self):
+        contributor = User.objects.create_user(username='helper', password='pass12345')
+        question = Question.objects.create(
             year=self.year,
-            question_text='Define median.',
-            answer_text='Median is the middle value.',
+            question_text='Define variance.',
+            answer_text='Variance measures spread.',
             marks='2',
+        )
+        AnswerContribution.objects.create(
+            question=question,
+            user=contributor,
+            answer_text='Pending student answer.',
+        )
+        approved = AnswerContribution.objects.create(
+            question=question,
+            user=contributor,
+            answer_text='Approved student answer.',
+            status=AnswerContribution.STATUS_APPROVED,
         )
 
         response = self.client.get(
@@ -63,7 +70,86 @@ class AcademicApiTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data[0]['answer_text'], 'Median is the middle value.')
+        self.assertEqual(len(response.data[0]['approved_contributions']), 1)
+        self.assertEqual(
+            response.data[0]['approved_contributions'][0]['id'],
+            approved.id,
+        )
+
+    def test_authenticated_user_can_submit_pending_answer_contribution(self):
+        user = User.objects.create_user(username='student-two', password='pass12345')
+        question = Question.objects.create(
+            year=self.year,
+            question_text='Define median.',
+            answer_text='Median is the middle value.',
+            marks='2',
+        )
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(
+            f'/api/questions/{question.id}/contributions/',
+            {'answer_text': 'Median splits ordered data in half.'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['status'], AnswerContribution.STATUS_PENDING)
+        contribution = AnswerContribution.objects.get()
+        self.assertEqual(contribution.user, user)
+        self.assertEqual(contribution.question, question)
+
+    def test_authenticated_user_can_submit_image_only_answer_contribution(self):
+        user = User.objects.create_user(username='diagram-student', password='pass12345')
+        question = Question.objects.create(
+            year=self.year,
+            question_text='Draw a normal distribution curve.',
+            answer_text='A bell-shaped curve.',
+            marks='2',
+        )
+        image = SimpleUploadedFile(
+            'curve.gif',
+            (
+                b'GIF87a\x01\x00\x01\x00\x80\x01\x00\x00\x00\x00'
+                b'\xff\xff\xff!\xf9\x04\x01\x00\x00\x01\x00,'
+                b'\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02L\x01\x00;'
+            ),
+            content_type='image/gif',
+        )
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(
+            f'/api/questions/{question.id}/contributions/',
+            {'image': image},
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        contribution = AnswerContribution.objects.get()
+        self.assertTrue(contribution.image.name.startswith('answer_contributions/'))
+
+    def test_answer_contribution_rejects_invalid_image_upload(self):
+        user = User.objects.create_user(username='bad-upload', password='pass12345')
+        question = Question.objects.create(
+            year=self.year,
+            question_text='Explain skewness.',
+            answer_text='Skewness measures asymmetry.',
+            marks='2',
+        )
+        invalid_image = SimpleUploadedFile(
+            'not-an-image.png',
+            b'not really an image',
+            content_type='image/png',
+        )
+        self.client.force_authenticate(user=user)
+
+        response = self.client.post(
+            f'/api/questions/{question.id}/contributions/',
+            {'image': invalid_image},
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['detail'], 'Upload a valid image file.')
 
     def test_subject_questions_can_be_loaded_by_subject_id(self):
         Question.objects.create(
