@@ -1,34 +1,104 @@
-from django.urls import path, include
-from rest_framework_simplejwt.views import TokenRefreshView, TokenVerifyView
-from .views import (
-    CustomTokenObtainPairView,
-    LogoutView,
-    ProfileView,
-    SubscriptionPlanListView,
-    NotificationListView,           # ✅ ADD
-    MarkNotificationReadView,       # ✅ ADD
-    MarkAllNotificationsReadView,   # ✅ ADD
-    UnreadNotificationCountView,    # ✅ ADD
-    DeleteNotificationView, 
+from django.urls import include, path
+from rest_framework_simplejwt.views import (
+    TokenObtainPairView,
+    TokenRefreshView,
+    TokenVerifyView,
 )
 
+from .serializers import CustomTokenObtainPairSerializer, CustomTokenRefreshSerializer
+from .views import (
+    DeleteNotificationView,
+    AdminDashboardView,
+    AdminQuestionDetailView,
+    AdminQuestionBulkImportView,
+    AdminQuestionListView,
+    AdminAnswerContributionDetailView,
+    AdminAnswerContributionListView,
+    AdminSemesterListView,
+    AdminSemesterDetailView,
+    AdminDiscussionDetailView,
+    AdminDiscussionListView,
+    AdminMockTestDetailView,
+    AdminMockTestListView,
+    AdminMockTestQuestionDetailView,
+    AdminMockTestQuestionListView,
+    AdminNotificationDetailView,
+    AdminNotificationListView,
+    AdminPaymentListView,
+    AdminSubjectDetailView,
+    AdminSubjectYearListView,
+    AdminSubjectListView,
+    AdminUserDetailView,
+    AdminUserListView,
+    ContactMessageCreateView,
+    EmailSubscriptionCreateView,
+    GoogleLoginView,
+    KhaltiInitiateView,
+    KhaltiVerifyView,
+    LogoutView,
+    MarkAllNotificationsReadView,
+    MarkNotificationReadView,
+    MySubscriptionListView,
+    NotificationListView,
+    PasswordResetConfirmView,
+    PasswordResetRequestView,
+    ProfileView,
+    SubscriptionPlanDetailView,
+    SubscriptionPlanListView,
+    UnreadNotificationCountView,
+)
+
+
+class CustomTokenObtainPairView(TokenObtainPairView):
+    serializer_class = CustomTokenObtainPairSerializer
+
+
+class CustomTokenRefreshView(TokenRefreshView):
+    serializer_class = CustomTokenRefreshSerializer
+
+
 urlpatterns = [
-    path('', include('djoser.urls')),       # ✅ Djoser auto adds all these:
-                                            # /users/                    → register
-                                            # /users/activation/         → activate email
-                                            # /users/reset_password/     → forgot password
-                                            # /users/reset_password_confirm/ → reset password
+    path('', include('djoser.urls')),
     path('jwt/create/', CustomTokenObtainPairView.as_view()),
-    path('jwt/refresh/', TokenRefreshView.as_view()),
+    path('jwt/refresh/', CustomTokenRefreshView.as_view()),
     path('jwt/verify/', TokenVerifyView.as_view()),
+    path('google/', GoogleLoginView.as_view()),
+    path('password-reset/', PasswordResetRequestView.as_view()),
+    path('password-reset/confirm/', PasswordResetConfirmView.as_view()),
     path('logout/', LogoutView.as_view()),
     path('profile/', ProfileView.as_view()),
-    path('plans/', SubscriptionPlanListView.as_view()),
+    path('contact/', ContactMessageCreateView.as_view()),
+    path('email-subscriptions/', EmailSubscriptionCreateView.as_view()),
+    path('subscription-plans/', SubscriptionPlanListView.as_view()),
+    path('subscription-plans/<slug:slug>/', SubscriptionPlanDetailView.as_view()),
+    path('my-subscriptions/', MySubscriptionListView.as_view()),
+    path('payments/khalti/initiate/', KhaltiInitiateView.as_view()),
+    path('payments/khalti/verify/', KhaltiVerifyView.as_view()),
     path('notifications/', NotificationListView.as_view()),
     path('notifications/unread-count/', UnreadNotificationCountView.as_view()),
     path('notifications/mark-all-read/', MarkAllNotificationsReadView.as_view()),
     path('notifications/<int:pk>/read/', MarkNotificationReadView.as_view()),
-    path('notifications/<int:pk>/delete/', DeleteNotificationView.as_view()),
-    
-    
+    path('notifications/<int:pk>/', DeleteNotificationView.as_view()),
+    path('admin/dashboard/', AdminDashboardView.as_view()),
+    path('admin/semesters/', AdminSemesterListView.as_view()),
+    path('admin/semesters/<int:pk>/', AdminSemesterDetailView.as_view()),
+    path('admin/subjects/', AdminSubjectListView.as_view()),
+    path('admin/subjects/<int:pk>/', AdminSubjectDetailView.as_view()),
+    path('admin/subjects/<int:pk>/years/', AdminSubjectYearListView.as_view()),
+    path('admin/questions/', AdminQuestionListView.as_view()),
+    path('admin/questions/bulk-import/', AdminQuestionBulkImportView.as_view()),
+    path('admin/questions/<int:pk>/', AdminQuestionDetailView.as_view()),
+    path('admin/answer-contributions/', AdminAnswerContributionListView.as_view()),
+    path('admin/answer-contributions/<int:pk>/', AdminAnswerContributionDetailView.as_view()),
+    path('admin/users/', AdminUserListView.as_view()),
+    path('admin/users/<int:pk>/', AdminUserDetailView.as_view()),
+    path('admin/payments/', AdminPaymentListView.as_view()),
+    path('admin/discussions/', AdminDiscussionListView.as_view()),
+    path('admin/discussions/<int:pk>/', AdminDiscussionDetailView.as_view()),
+    path('admin/notifications/', AdminNotificationListView.as_view()),
+    path('admin/notifications/<int:pk>/', AdminNotificationDetailView.as_view()),
+    path('admin/mock-tests/', AdminMockTestListView.as_view()),
+    path('admin/mock-tests/<int:pk>/', AdminMockTestDetailView.as_view()),
+    path('admin/mock-tests/<int:pk>/questions/', AdminMockTestQuestionListView.as_view()),
+    path('admin/mock-test-questions/<int:pk>/', AdminMockTestQuestionDetailView.as_view()),
 ]

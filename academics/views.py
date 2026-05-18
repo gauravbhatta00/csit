@@ -1,17 +1,50 @@
-from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.response import Response
 from rest_framework.generics import ListAPIView, RetrieveAPIView
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
-from .models import Semester, Subject, Syllabus, Year, Question, QuestionPaper,MockTest, MockTestQuestion, MockTestResult,Discussion, DiscussionReply
+from PIL import Image, UnidentifiedImageError
+from django.db.models import Prefetch, Q
+from django.shortcuts import get_object_or_404
+from .models import (
+    Discussion,
+    DiscussionReply,
+    AnswerContribution,
+    MockTest,
+    MockTestAnswer,
+    MockTestResult,
+    Semester,
+    Subject,
+    Syllabus,
+    Year,
+    Question,
+    QuestionPaper,
+)
 from .serializers import (
+    DiscussionReplySerializer,
+    DiscussionSerializer,
+    AnswerContributionSerializer,
+    MockTestAnswerReviewSerializer,
+    MockTestListSerializer,
+    MockTestResultSerializer,
+    MockTestSerializer,
     SemesterSerializer, SubjectSerializer,
     SyllabusSerializer, YearSerializer,
-    QuestionSerializer, QuestionPaperSerializer,
-    MockTestSerializer, MockTestListSerializer, MockTestResultSerializer,
-    DiscussionSerializer, DiscussionReplySerializer 
+    QuestionSerializer, QuestionPaperSerializer
 )
 from accounts.permissions import IsPremiumUser, IsSingleDeviceAuthenticated
 from .utils import notify_reply
+
+
+def build_slug_or_id_query(value, slug_field='slug', id_field='id'):
+    query = Q(**{slug_field: value})
+    if str(value).isdigit():
+        query |= Q(**{id_field: int(value)})
+    return query
+
+
+def get_subject_by_slug_or_id(value):
+    return get_object_or_404(Subject, build_slug_or_id_query(value))
 
 
 class SemesterListView(ListAPIView):
@@ -26,9 +59,11 @@ class SemesterSubjectListView(ListAPIView):
 
     def get_queryset(self):
         # ✅ Filter by slug instead of pk
-        return Subject.objects.filter(
-            semester__slug=self.kwargs['semester_slug']
-        ).select_related('syllabus')
+        semester_value = self.kwargs['semester_slug']
+        query = Q(semester__slug=semester_value)
+        if str(semester_value).isdigit():
+            query |= Q(semester_id=int(semester_value))
+        return Subject.objects.filter(query).select_related('syllabus')
 
 
 class SubjectSyllabusView(RetrieveAPIView):
@@ -37,7 +72,16 @@ class SubjectSyllabusView(RetrieveAPIView):
 
     def get_object(self):
         # ✅ Filter by subject slug
-        return Syllabus.objects.get(subject__slug=self.kwargs['subject_slug'])
+        subject = get_subject_by_slug_or_id(self.kwargs['subject_slug'])
+        return get_object_or_404(Syllabus, subject=subject)
+
+
+class SubjectDetailView(RetrieveAPIView):
+    permission_classes = [AllowAny]
+    serializer_class = SubjectSerializer
+
+    def get_object(self):
+        return get_subject_by_slug_or_id(self.kwargs['subject_slug'])
 
 
 class SubjectYearListView(ListAPIView):
@@ -45,7 +89,8 @@ class SubjectYearListView(ListAPIView):
     serializer_class = YearSerializer
 
     def get_queryset(self):
-        return Year.objects.filter(subject__slug=self.kwargs['subject_slug'])
+        subject = get_subject_by_slug_or_id(self.kwargs['subject_slug'])
+        return Year.objects.filter(subject=subject)
 
 
 class YearQuestionListView(ListAPIView):
@@ -53,9 +98,18 @@ class YearQuestionListView(ListAPIView):
     serializer_class = QuestionSerializer
 
     def get_queryset(self):
+        subject = get_subject_by_slug_or_id(self.kwargs['subject_slug'])
         return Question.objects.filter(
-            year__subject__slug=self.kwargs['subject_slug'],
+            year__subject=subject,
             year__year=self.kwargs['year']
+        ).select_related('section').prefetch_related(
+            Prefetch(
+                'contributions',
+                queryset=AnswerContribution.objects.filter(
+                    status=AnswerContribution.STATUS_APPROVED,
+                ).select_related('user'),
+                to_attr='approved_contributions_cache',
+            )
         )
 
     def get_serializer_context(self):
@@ -67,27 +121,76 @@ class YearQuestionPaperView(RetrieveAPIView):
     serializer_class = QuestionPaperSerializer
 
     def get_object(self):
+        subject = get_subject_by_slug_or_id(self.kwargs['subject_slug'])
         return QuestionPaper.objects.get(
-            year__subject__slug=self.kwargs['subject_slug'],
+            year__subject=subject,
             year__year=self.kwargs['year']
         )
-    
+
+
+class QuestionContributionListView(APIView):
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsAuthenticated()]
+        return [AllowAny()]
+
+    def get_question(self, pk):
+        return get_object_or_404(Question, pk=pk)
+
+    def get(self, request, pk):
+        question = self.get_question(pk)
+        contributions = question.contributions.filter(
+            status=AnswerContribution.STATUS_APPROVED,
+        ).select_related('user')
+        return Response(AnswerContributionSerializer(contributions, many=True).data)
+
+    def post(self, request, pk):
+        question = self.get_question(pk)
+        answer_text = (request.data.get('answer_text') or '').strip()
+        image = request.FILES.get('image')
+
+        if not answer_text and not image:
+            return Response(
+                {'detail': 'Answer text or image is required.'},
+                status=400,
+            )
+
+        if image:
+            try:
+                Image.open(image).verify()
+                image.seek(0)
+            except (OSError, UnidentifiedImageError):
+                return Response({'detail': 'Upload a valid image file.'}, status=400)
+
+        contribution = AnswerContribution.objects.create(
+            question=question,
+            user=request.user,
+            answer_text=answer_text,
+            image=image,
+        )
+        return Response(
+            AnswerContributionSerializer(contribution).data,
+            status=201,
+        )
+
+
 class SubjectMockTestListView(ListAPIView):
-    """List all mock tests for a subject — no questions included."""
     permission_classes = [AllowAny]
-    serializer_class = MockTestListSerializer   # ✅ Uses list serializer
+    serializer_class = MockTestListSerializer
 
     def get_queryset(self):
+        subject = get_subject_by_slug_or_id(self.kwargs['subject_slug'])
         return MockTest.objects.filter(
-            subject__slug=self.kwargs['subject_slug'],
-            is_active=True
+            subject=subject,
+            is_active=True,
         )
 
 
 class MockTestDetailView(RetrieveAPIView):
-    """Get specific mock test with all questions."""
     permission_classes = [AllowAny]
-    serializer_class = MockTestSerializer       # ✅ Full serializer with questions
+    serializer_class = MockTestSerializer
 
     def get_object(self):
         return MockTest.objects.get(id=self.kwargs['pk'])
@@ -98,15 +201,16 @@ class SubmitMockTestView(APIView):
 
     def post(self, request, pk):
         try:
-            mock_test = MockTest.objects.get(id=pk)
+            mock_test = MockTest.objects.prefetch_related('questions').get(id=pk)
         except MockTest.DoesNotExist:
-            return Response({'error': 'Test not found.'}, status=404)
+            return Response({'detail': 'Test not found.'}, status=404)
 
         answers = request.data.get('answers', {})
         score = 0
+        questions = list(mock_test.questions.all())
 
-        for question in mock_test.questions.all():
-            submitted = answers.get(str(question.id))
+        for question in questions:
+            submitted = (answers.get(str(question.id)) or '').upper()
             if submitted and submitted.upper() == question.correct_option:
                 score += question.marks
 
@@ -114,14 +218,29 @@ class SubmitMockTestView(APIView):
             user=request.user,
             mock_test=mock_test,
             score=score,
-            total_marks=mock_test.total_marks
+            total_marks=mock_test.total_marks,
         )
+
+        MockTestAnswer.objects.bulk_create([
+            MockTestAnswer(
+                result=result,
+                question=question,
+                selected_option=(answers.get(str(question.id)) or '').upper(),
+                correct_option=question.correct_option,
+                is_correct=(
+                    (answers.get(str(question.id)) or '').upper()
+                    == question.correct_option
+                ),
+            )
+            for question in questions
+        ])
 
         return Response({
             'score': score,
             'total_marks': mock_test.total_marks,
-            'percentage': round((score / mock_test.total_marks) * 100, 2),
-            'result_id': result.id
+            'percentage': round((score / mock_test.total_marks) * 100, 2)
+            if mock_test.total_marks else 0,
+            'result_id': result.id,
         })
 
 
@@ -130,27 +249,20 @@ class UserMockTestResultListView(ListAPIView):
     serializer_class = MockTestResultSerializer
 
     def get_queryset(self):
-        return MockTestResult.objects.filter(
-            user=self.request.user
-        ).order_by('-completed_at')
-    
+        return MockTestResult.objects.filter(user=self.request.user)
+
 
 class MockTestResultDetailView(APIView):
-    """Get result by result_id."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
-        # ✅ pk is now result_id not mock_test_id
         try:
-            result = MockTestResult.objects.get(
-                id=pk,
-                user=request.user  # ✅ User can only see their own results
-            )
+            result = MockTestResult.objects.select_related(
+                'mock_test',
+                'mock_test__subject',
+            ).get(id=pk, user=request.user)
         except MockTestResult.DoesNotExist:
-            return Response(
-                {'error': 'Result not found.'},
-                status=404
-            )
+            return Response({'detail': 'Result not found.'}, status=404)
 
         return Response({
             'result_id': result.id,
@@ -159,33 +271,33 @@ class MockTestResultDetailView(APIView):
             'subject': result.mock_test.subject.name,
             'score': result.score,
             'total_marks': result.total_marks,
-            'percentage': round((result.score / result.total_marks) * 100, 2),
-            'completed_at': result.completed_at
+            'percentage': round((result.score / result.total_marks) * 100, 2)
+            if result.total_marks else 0,
+            'completed_at': result.completed_at,
+            'answers': MockTestAnswerReviewSerializer(
+                result.answers.select_related('question'),
+                many=True,
+            ).data,
         })
+
+
 class SubjectDiscussionListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, subject_slug):
-        try:
-            subject = Subject.objects.get(slug=subject_slug)
-        except Subject.DoesNotExist:
-            return Response({'error': 'Subject not found.'}, status=404)
+        subject = get_subject_by_slug_or_id(subject_slug)
 
-        discussions = Discussion.objects.filter(subject=subject)
+        discussions = Discussion.objects.filter(subject=subject).select_related('user')
         serializer = DiscussionSerializer(discussions, many=True)
         return Response(serializer.data)
 
     def post(self, request, subject_slug):
-        try:
-            subject = Subject.objects.get(slug=subject_slug)
-        except Subject.DoesNotExist:
-            return Response({'error': 'Subject not found.'}, status=404)
+        subject = get_subject_by_slug_or_id(subject_slug)
 
         serializer = DiscussionSerializer(data=request.data)
-        if serializer.is_valid():
-            serializer.save(user=request.user, subject=subject)
-            return Response(serializer.data, status=201)
-        return Response(serializer.errors, status=400)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(user=request.user, subject=subject)
+        return Response(serializer.data, status=201)
 
 
 class DiscussionDetailView(APIView):
@@ -195,145 +307,113 @@ class DiscussionDetailView(APIView):
         try:
             discussion = Discussion.objects.get(id=pk)
         except Discussion.DoesNotExist:
-            return Response({'error': 'Discussion not found.'}, status=404)
+            return Response({'detail': 'Discussion not found.'}, status=404)
 
-        serializer = DiscussionSerializer(discussion)
-        return Response(serializer.data)
+        return Response(DiscussionSerializer(discussion).data)
 
     def delete(self, request, pk):
         try:
             discussion = Discussion.objects.get(id=pk, user=request.user)
-            discussion.delete()
-            return Response({'message': 'Discussion deleted.'})
         except Discussion.DoesNotExist:
-            return Response({'error': 'Not found or not authorized.'}, status=404)
+            return Response({'detail': 'Not found or not authorized.'}, status=404)
+
+        discussion.delete()
+        return Response({'message': 'Discussion deleted.'})
 
 
 class DiscussionReplyView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        """
-        Add reply to discussion or reply to a reply.
-        Send parent_id in body to reply to a specific reply.
-        """
         try:
             discussion = Discussion.objects.get(id=pk)
         except Discussion.DoesNotExist:
-            return Response({'error': 'Discussion not found.'}, status=404)
+            return Response({'detail': 'Discussion not found.'}, status=404)
 
         body = request.data.get('body')
-        parent_id = request.data.get('parent_id', None)  # ✅ Optional parent reply
+        parent_id = request.data.get('parent_id')
 
         if not body:
-            return Response({'error': 'Body is required.'}, status=400)
+            return Response({'detail': 'Body is required.'}, status=400)
 
         parent = None
         if parent_id:
             try:
-                parent = DiscussionReply.objects.get(id=parent_id, discussion=discussion)
+                parent = DiscussionReply.objects.get(
+                    id=parent_id,
+                    discussion=discussion,
+                )
             except DiscussionReply.DoesNotExist:
-                return Response({'error': 'Parent reply not found.'}, status=404)
+                return Response({'detail': 'Parent reply not found.'}, status=404)
 
         reply = DiscussionReply.objects.create(
             discussion=discussion,
             user=request.user,
             body=body,
-            parent=parent  # ✅ None = top level, set = nested reply
+            parent=parent,
         )
 
-        serializer = DiscussionReplySerializer(reply)
-        return Response(serializer.data, status=201)
+        if discussion.user != request.user:
+            notify_reply(
+                discussion_owner=discussion.user,
+                replier_username=request.user.username,
+                discussion=discussion,
+            )
+
+        if parent and parent.user != request.user:
+            notify_reply(
+                discussion_owner=parent.user,
+                replier_username=request.user.username,
+                discussion=discussion,
+            )
+
+        return Response(DiscussionReplySerializer(reply).data, status=201)
 
     def delete(self, request, pk):
         try:
             reply = DiscussionReply.objects.get(id=pk, user=request.user)
-            reply.delete()
-            return Response({'message': 'Reply deleted.'})
         except DiscussionReply.DoesNotExist:
-            return Response({'error': 'Not found or not authorized.'}, status=404)
+            return Response({'detail': 'Not found or not authorized.'}, status=404)
+
+        reply.delete()
+        return Response({'message': 'Reply deleted.'})
+
+
 class SearchView(APIView):
-    """Search across subjects and questions."""
     permission_classes = [AllowAny]
 
     def get(self, request):
         query = request.query_params.get('q', '')
 
         if not query:
-            return Response({'error': 'Search query required.'}, status=400)
+            return Response({'detail': 'Search query required.'}, status=400)
 
-        # ✅ Search subjects
-        subjects = Subject.objects.filter(
-            name__icontains=query
-        ).select_related('semester')
-
-        # ✅ Search questions
+        subjects = Subject.objects.filter(name__icontains=query).select_related('semester')
         questions = Question.objects.filter(
-            question_text__icontains=query
+            question_text__icontains=query,
         ).select_related('year__subject')
 
         return Response({
-            'subjects': SubjectSerializer(subjects, many=True).data,
+            'subjects': [
+                {
+                    'id': subject.id,
+                    'name': subject.name,
+                    'slug': subject.slug,
+                    'semester': subject.semester.id,
+                    'semester_name': subject.semester.name,
+                    'semester_slug': subject.semester.slug,
+                }
+                for subject in subjects
+            ],
             'questions': [
                 {
-                    'id': q.id,
-                    'question_text': q.question_text,
-                    'subject': q.year.subject.name,
-                    'year': q.year.year,
-                    'subject_slug': q.year.subject.slug,
+                    'id': question.id,
+                    'question_text': question.question_text,
+                    'subject': question.year.subject.name,
+                    'year': question.year.year,
+                    'subject_slug': question.year.subject.slug,
+                    'semester_slug': question.year.subject.semester.slug,
                 }
-                for q in questions
-            ]
+                for question in questions
+            ],
         })
-    
-
-
-
-
-class DiscussionReplyView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request, pk):
-        try:
-            discussion = Discussion.objects.get(id=pk)
-        except Discussion.DoesNotExist:
-            return Response({'error': 'Discussion not found.'}, status=404)
-
-        body = request.data.get('body')
-        parent_id = request.data.get('parent_id', None)
-
-        if not body:
-            return Response({'error': 'Body is required.'}, status=400)
-
-        parent = None
-        if parent_id:
-            try:
-                parent = DiscussionReply.objects.get(id=parent_id, discussion=discussion)
-            except DiscussionReply.DoesNotExist:
-                return Response({'error': 'Parent reply not found.'}, status=404)
-
-        reply = DiscussionReply.objects.create(
-            discussion=discussion,
-            user=request.user,
-            body=body,
-            parent=parent
-        )
-
-        # ✅ Notify discussion owner (not if replying to own discussion)
-        if discussion.user != request.user:
-            notify_reply(
-                discussion_owner=discussion.user,
-                replier_username=request.user.username,
-                discussion_title=discussion.title
-            )
-
-        # ✅ Notify parent reply owner if nested reply
-        if parent and parent.user != request.user:
-            notify_reply(
-                discussion_owner=parent.user,
-                replier_username=request.user.username,
-                discussion_title=discussion.title
-            )
-
-        serializer = DiscussionReplySerializer(reply)
-        return Response(serializer.data, status=201)
