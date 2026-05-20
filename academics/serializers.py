@@ -137,6 +137,30 @@ class DiscussionSerializer(serializers.ModelSerializer):
         return DiscussionReplySerializer(top_level, many=True).data
 
 
+class PlatformDiscussionSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source='user.username', read_only=True)
+    reply_count = serializers.IntegerField(source='replies.count', read_only=True)
+    subject_name = serializers.CharField(source='subject.name', read_only=True)
+    subject_slug = serializers.CharField(source='subject.slug', read_only=True)
+    semester_name = serializers.CharField(source='subject.semester.name', read_only=True)
+    semester_slug = serializers.CharField(source='subject.semester.slug', read_only=True)
+
+    class Meta:
+        model = Discussion
+        fields = [
+            'id',
+            'username',
+            'title',
+            'body',
+            'reply_count',
+            'created_at',
+            'subject_name',
+            'subject_slug',
+            'semester_name',
+            'semester_slug',
+        ]
+
+
 class MockTestQuestionSerializer(serializers.ModelSerializer):
     class Meta:
         model = MockTestQuestion

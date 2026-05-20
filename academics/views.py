@@ -28,6 +28,7 @@ from .serializers import (
     MockTestListSerializer,
     MockTestResultSerializer,
     MockTestSerializer,
+    PlatformDiscussionSerializer,
     SemesterSerializer, SubjectSerializer,
     SyllabusSerializer, YearSerializer,
     QuestionSerializer, QuestionPaperSerializer
@@ -298,6 +299,28 @@ class SubjectDiscussionListView(APIView):
         serializer.is_valid(raise_exception=True)
         serializer.save(user=request.user, subject=subject)
         return Response(serializer.data, status=201)
+
+
+class PlatformDiscussionListView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        try:
+            limit = int(request.query_params.get('limit', 8))
+        except (TypeError, ValueError):
+            limit = 8
+
+        limit = max(1, min(limit, 24))
+        randomize = request.query_params.get('random') in {'1', 'true', 'yes'}
+        ordering = '?' if randomize else '-created_at'
+        discussions = (
+            Discussion.objects.select_related('user', 'subject', 'subject__semester')
+            .prefetch_related('replies')
+            .order_by(ordering)[:limit]
+        )
+
+        serializer = PlatformDiscussionSerializer(discussions, many=True)
+        return Response(serializer.data)
 
 
 class DiscussionDetailView(APIView):

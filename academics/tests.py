@@ -251,3 +251,20 @@ class AcademicApiTests(APITestCase):
         self.assertEqual(notification.type, Notification.TYPE_REPLY)
         self.assertIn('replier', notification.message)
         self.assertIn(self.subject.slug, notification.link_path)
+
+    def test_platform_discussions_are_visible_without_login(self):
+        owner = User.objects.create_user(username='owner', password='pass12345')
+        Discussion.objects.create(
+            subject=self.subject,
+            user=owner,
+            title='How should I revise probability?',
+            body='Which chapters matter most for exam preparation?',
+        )
+
+        response = self.client.get('/api/discussions/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data[0]['title'], 'How should I revise probability?')
+        self.assertEqual(response.data[0]['subject_name'], self.subject.name)
+        self.assertEqual(response.data[0]['subject_slug'], self.subject.slug)
+        self.assertEqual(response.data[0]['semester_slug'], self.semester.slug)
