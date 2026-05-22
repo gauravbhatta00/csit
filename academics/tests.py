@@ -11,9 +11,13 @@ from .models import (
     MockTestAnswer,
     MockTestQuestion,
     MockTestResult,
+    Note,
     Question,
     Semester,
     Subject,
+    Syllabus,
+    SyllabusSection,
+    SyllabusUnit,
     Year,
 )
 
@@ -180,6 +184,67 @@ class AcademicApiTests(APITestCase):
         self.assertEqual(id_response.status_code, status.HTTP_200_OK)
         self.assertEqual(slug_response.data['id'], self.subject.id)
         self.assertEqual(id_response.data['slug'], self.subject.slug)
+
+    def test_subject_syllabus_includes_ordered_units(self):
+        syllabus = Syllabus.objects.create(
+            subject=self.subject,
+            course_title='Statistics',
+            course_description='Study of data.',
+        )
+        SyllabusUnit.objects.create(
+            syllabus=syllabus,
+            title='Measures of Central Tendency',
+            slug='unit-1',
+            duration='4 Hrs.',
+            content='Mean, median, and mode.',
+            order=1,
+        )
+        SyllabusSection.objects.create(
+            syllabus=syllabus,
+            title='Recommended Books',
+            content='Supplemental statistics references.',
+            order=1,
+        )
+
+        response = self.client.get(f'/api/subjects/{self.subject.slug}/syllabus/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['course_title'], 'Statistics')
+        self.assertEqual(response.data['units'][0]['slug'], 'unit-1')
+        self.assertEqual(response.data['units'][0]['content'], 'Mean, median, and mode.')
+        self.assertEqual(response.data['sections'][0]['title'], 'Recommended Books')
+
+    def test_subject_notes_can_be_filtered_by_unit(self):
+        syllabus = Syllabus.objects.create(subject=self.subject)
+        unit = SyllabusUnit.objects.create(
+            syllabus=syllabus,
+            title='Probability',
+            slug='unit-1',
+            order=1,
+        )
+        Note.objects.create(
+            subject=self.subject,
+            unit=unit,
+            title='Probability basics',
+            slug='probability-basics',
+            body='Sample space and events.',
+        )
+        Note.objects.create(
+            subject=self.subject,
+            title='Draft note',
+            slug='draft-note',
+            body='Hidden.',
+            is_published=False,
+        )
+
+        response = self.client.get(
+            f'/api/subjects/{self.subject.slug}/notes/?unit=unit-1'
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]['title'], 'Probability basics')
+        self.assertEqual(response.data[0]['unit_slug'], 'unit-1')
 
     def test_mock_test_submit_scores_and_stores_answer_review(self):
         user = User.objects.create_user(username='tester', password='pass12345')

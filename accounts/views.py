@@ -6,18 +6,19 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
 from django.core.mail import send_mail
 from rest_framework.views import APIView
-from rest_framework.generics import ListAPIView, RetrieveAPIView
+from rest_framework.generics import ListAPIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import JSONParser, MultiPartParser, FormParser
 from rest_framework import status
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from django.shortcuts import get_object_or_404
-from django.db.models import Avg, Count, Sum
+from django.db import IntegrityError, transaction
+from django.db.models import Avg, Count
 from django.db.models.functions import TruncDate
-from django.utils.crypto import get_random_string
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from django.utils.text import slugify
@@ -28,49 +29,172 @@ from academics.models import (
     MockTest,
     MockTestQuestion,
     MockTestResult,
+    Note,
     Question,
     QuestionPaper,
     QuestionSection,
     Semester,
     Subject,
     Syllabus,
+    SyllabusSection,
+    SyllabusUnit,
     Year,
 )
 from .models import (
     ContactMessage,
     EmailSubscription,
     Notification,
-    PaymentTransaction,
-    SubscriptionPlan,
-    UserSubscription,
+    Testimonial,
 )
 from .serializers import (
     ContactMessageSerializer,
     EmailSubscriptionSerializer,
     GoogleLoginSerializer,
-    KhaltiInitiateSerializer,
-    KhaltiVerifySerializer,
     NotificationSerializer,
     PasswordResetConfirmSerializer,
     PasswordResetRequestSerializer,
-    PaymentTransactionSerializer,
     ProfileSerializer,
     ProfileUpdateSerializer,
-    SubscriptionPlanSerializer,
-    UserSubscriptionSerializer,
+    TestimonialSerializer,
 )
 from .services import (
-    KhaltiConfigurationError,
-    KhaltiPaymentError,
     GoogleAuthConfigurationError,
     GoogleAuthError,
-    apply_khalti_lookup,
     build_login_response,
     build_unique_username,
-    initiate_khalti_payment,
-    lookup_khalti_payment,
     verify_google_id_token,
 )
+
+
+SYLLABUS_FIELD_SECTIONS = {
+    'course description': 'course_description',
+    'course objective': 'course_objective',
+    'course objectives': 'course_objective',
+    'laboratory works': 'laboratory_work',
+    'laboratory work': 'laboratory_work',
+    'text books': 'text_books',
+    'text book': 'text_books',
+    'reference books': 'reference_books',
+    'reference book': 'reference_books',
+}
+
+
+def clean_csv_value(value):
+    return (value or '').strip()
+
+
+def compact_match_value(value):
+    return ''.join(character for character in clean_csv_value(value).lower() if character.isalnum())
+
+
+def normalize_course_match(value):
+    normalized = compact_match_value(value)
+    replacements = {
+        'structures': 'structure',
+        'systems': 'system',
+        'algorithms': 'algorithm',
+        'administration': 'administrator',
+    }
+    for old, new in replacements.items():
+        normalized = normalized.replace(old, new)
+    return normalized
+
+
+def append_csv_text(current, value):
+    value = clean_csv_value(value)
+    if not value:
+        return current
+    current = clean_csv_value(current)
+    return f'{current}\n{value}' if current else value
+
+
+def parse_csv_order(value):
+    try:
+        return int(float(clean_csv_value(value)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def parse_csv_bool(value, default=True):
+    if isinstance(value, bool):
+        return value
+    normalized = clean_csv_value(value).lower()
+    if not normalized:
+        return default
+    return normalized in {'1', 'true', 'yes', 'y', 'published'}
+
+
+def read_uploaded_csv(uploaded_file):
+    try:
+        text = uploaded_file.read().decode('utf-8-sig')
+    except UnicodeDecodeError:
+        uploaded_file.seek(0)
+        text = uploaded_file.read().decode('cp1252')
+    return list(csv.DictReader(io.StringIO(text)))
+
+
+def validate_pdf_upload(uploaded_file):
+    if not uploaded_file:
+        return None
+    if not uploaded_file.name.lower().endswith('.pdf'):
+        return 'Only PDF files are allowed.'
+    content_type = getattr(uploaded_file, 'content_type', '')
+    if content_type and content_type not in {'application/pdf', 'application/x-pdf', 'application/octet-stream'}:
+        return 'Upload a valid PDF file.'
+    return None
+
+
+def derive_note_title(subject, unit, pdf_file):
+    if unit:
+        return unit.title
+    if pdf_file:
+        title = pdf_file.name.rsplit('.', 1)[0].replace('_', ' ').replace('-', ' ').strip()
+        if title:
+            return title
+    return f'{subject.name} Note'
+
+
+def build_note_slug(subject, unit, title):
+    if unit:
+        return unit.slug
+    return slugify(title) or f'note-{subject.notes.count() + 1}'
+
+
+def choose_subject_csv_rows(subject, rows):
+    grouped_rows = {}
+    for row in rows:
+        key = (
+            clean_csv_value(row.get('course_code')),
+            clean_csv_value(row.get('course_title')),
+        )
+        grouped_rows.setdefault(key, []).append(row)
+
+    if not grouped_rows:
+        return []
+
+    subject_name = normalize_course_match(subject.name)
+    for (course_code, course_title), grouped in grouped_rows.items():
+        syllabus = getattr(subject, 'syllabus', None)
+        if syllabus and course_code and compact_match_value(course_code) == compact_match_value(syllabus.course_no):
+            return grouped
+        if course_title and normalize_course_match(course_title) == subject_name:
+            return grouped
+
+    if len(grouped_rows) == 1:
+        return next(iter(grouped_rows.values()))
+
+    return []
+
+
+def unique_syllabus_unit_slug(syllabus, title, used_slugs):
+    base = slugify(title) or 'unit'
+    slug = base
+    index = 2
+    while slug in used_slugs or SyllabusUnit.objects.filter(syllabus=syllabus, slug=slug).exists():
+        slug = f'{base}-{index}'
+        index += 1
+    used_slugs.add(slug)
+    return slug
 
 
 class LogoutView(APIView):
@@ -109,6 +233,82 @@ class ProfileView(APIView):
         return Response(
             ProfileSerializer(request.user, context={'request': request}).data
         )
+
+
+class TestimonialListCreateView(APIView):
+    permission_classes = [AllowAny]
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsAuthenticated()]
+        return [AllowAny()]
+
+    def get(self, request):
+        if request.query_params.get('mine') in {'1', 'true', 'True'}:
+            if not request.user or not request.user.is_authenticated:
+                return Response(
+                    {'detail': 'Authentication is required.'},
+                    status=401,
+                )
+            testimonial = Testimonial.objects.filter(user=request.user).first()
+            if not testimonial:
+                return Response(None)
+            return Response(TestimonialSerializer(testimonial).data)
+
+        try:
+            limit = int(request.query_params.get('limit', 8))
+        except (TypeError, ValueError):
+            limit = 8
+
+        limit = max(1, min(limit, 16))
+        testimonials = (
+            Testimonial.objects
+            .select_related('user')
+            .filter(status=Testimonial.STATUS_APPROVED)
+            .order_by('-created_at')[:limit]
+        )
+        serializer = TestimonialSerializer(testimonials, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        if not request.user or not request.user.is_authenticated:
+            return Response(
+                {'detail': 'Authentication is required to submit a review.'},
+                status=401,
+            )
+
+        data = request.data.copy()
+        data['name'] = request.user.username
+
+        serializer = TestimonialSerializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        testimonial = Testimonial.objects.filter(user=request.user).first()
+        if testimonial:
+            testimonial.name = serializer.validated_data['name']
+            testimonial.role = serializer.validated_data.get('role', '')
+            testimonial.rating = serializer.validated_data['rating']
+            testimonial.review = serializer.validated_data['review']
+            testimonial.status = Testimonial.STATUS_PENDING
+            testimonial.reviewed_by = None
+            testimonial.reviewed_at = None
+            testimonial.save(
+                update_fields=[
+                    'name',
+                    'role',
+                    'rating',
+                    'review',
+                    'status',
+                    'reviewed_by',
+                    'reviewed_at',
+                    'updated_at',
+                ]
+            )
+        else:
+            testimonial = serializer.save(
+                user=request.user,
+                status=Testimonial.STATUS_PENDING,
+            )
+        return Response(TestimonialSerializer(testimonial).data, status=201)
 
 
 class PasswordResetRequestView(APIView):
@@ -201,23 +401,6 @@ class GoogleLoginView(APIView):
         return Response(build_login_response(user))
 
 
-class SubscriptionPlanListView(ListAPIView):
-    permission_classes = [AllowAny]
-    serializer_class = SubscriptionPlanSerializer
-
-    def get_queryset(self):
-        return SubscriptionPlan.objects.filter(is_active=True)
-
-
-class SubscriptionPlanDetailView(RetrieveAPIView):
-    permission_classes = [AllowAny]
-    serializer_class = SubscriptionPlanSerializer
-    lookup_field = 'slug'
-
-    def get_queryset(self):
-        return SubscriptionPlan.objects.filter(is_active=True)
-
-
 class ContactMessageCreateView(APIView):
     permission_classes = [AllowAny]
 
@@ -243,106 +426,6 @@ class EmailSubscriptionCreateView(APIView):
             EmailSubscriptionSerializer(subscription).data,
             status=status_code,
         )
-
-
-class MySubscriptionListView(ListAPIView):
-    permission_classes = [IsAuthenticated]
-    serializer_class = UserSubscriptionSerializer
-
-    def get_queryset(self):
-        return UserSubscription.objects.filter(
-            user=self.request.user,
-        ).select_related('plan')
-
-
-class KhaltiInitiateView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        serializer = KhaltiInitiateSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
-
-        try:
-            plan = SubscriptionPlan.objects.get(
-                slug=data['plan_slug'],
-                is_active=True,
-            )
-        except SubscriptionPlan.DoesNotExist:
-            return Response(
-                {'detail': 'Selected subscription plan was not found.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        amount_paisa = int(plan.price * 100)
-        purchase_order_id = f"sub-{request.user.id}-{get_random_string(12)}"
-        payment = PaymentTransaction.objects.create(
-            user=request.user,
-            plan=plan,
-            amount=plan.price,
-            amount_paisa=amount_paisa,
-            purchase_order_id=purchase_order_id,
-            purchase_order_name=f"{plan.name} subscription",
-            customer_name=data['customer_name'],
-            customer_email=data.get('customer_email', ''),
-            customer_phone=data.get('customer_phone', ''),
-        )
-
-        try:
-            initiate_khalti_payment(payment)
-        except KhaltiConfigurationError as exc:
-            payment.status = PaymentTransaction.STATUS_FAILED
-            payment.save(update_fields=['status', 'updated_at'])
-            return Response(
-                {'detail': str(exc)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-        except KhaltiPaymentError as exc:
-            payment.status = PaymentTransaction.STATUS_FAILED
-            payment.save(update_fields=['status', 'updated_at'])
-            return Response(
-                {'detail': 'Khalti initiation failed.', 'error': str(exc)},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
-
-        return Response(PaymentTransactionSerializer(payment).data)
-
-
-class KhaltiVerifyView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        serializer = KhaltiVerifySerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        pidx = serializer.validated_data['pidx']
-
-        try:
-            payment = PaymentTransaction.objects.select_related(
-                'plan',
-                'user',
-                'subscription',
-            ).get(pidx=pidx, user=request.user)
-        except PaymentTransaction.DoesNotExist:
-            return Response(
-                {'detail': 'Payment transaction was not found.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        try:
-            lookup_data = lookup_khalti_payment(pidx)
-        except KhaltiConfigurationError as exc:
-            return Response(
-                {'detail': str(exc)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-        except KhaltiPaymentError as exc:
-            return Response(
-                {'detail': 'Khalti lookup failed.', 'error': str(exc)},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
-
-        payment = apply_khalti_lookup(payment, lookup_data)
-        return Response(PaymentTransactionSerializer(payment).data)
 
 
 class NotificationListView(ListAPIView):
@@ -414,24 +497,6 @@ class AdminDashboardView(APIView):
     def get(self, request):
         today = timezone.now().date()
         start_date = today - timezone.timedelta(days=29)
-        payment_statuses = dict(
-            PaymentTransaction.objects.values_list('status').annotate(
-                count=Count('id')
-            )
-        )
-        payments_by_day = {
-            item['day'].isoformat(): item
-            for item in PaymentTransaction.objects.filter(
-                created_at__date__gte=start_date,
-            )
-            .annotate(day=TruncDate('created_at'))
-            .values('day')
-            .annotate(
-                count=Count('id'),
-                revenue=Sum('amount'),
-            )
-            .order_by('day')
-        }
         mock_attempts_by_day = {
             item['day'].isoformat(): item['attempts']
             for item in MockTestResult.objects.filter(
@@ -447,11 +512,8 @@ class AdminDashboardView(APIView):
         for offset in range(30):
             day = start_date + timezone.timedelta(days=offset)
             key = day.isoformat()
-            payment_day = payments_by_day.get(key, {})
             timeline.append({
                 'date': key,
-                'payments': payment_day.get('count', 0),
-                'revenue': float(payment_day.get('revenue') or 0),
                 'mock_attempts': mock_attempts_by_day.get(key, 0),
             })
 
@@ -479,17 +541,6 @@ class AdminDashboardView(APIView):
             .annotate(attempts=Count('id'))
             .order_by('-attempts')[:8]
         ]
-        recent_payments = [
-            {
-                'id': payment.id,
-                'customer_name': payment.customer_name,
-                'plan': payment.plan.name,
-                'amount': float(payment.amount),
-                'status': payment.status,
-                'created_at': payment.created_at,
-            }
-            for payment in PaymentTransaction.objects.select_related('plan')[:5]
-        ]
         recent_discussions = [
             {
                 'id': discussion.id,
@@ -511,9 +562,6 @@ class AdminDashboardView(APIView):
         return Response({
             'totals': {
                 'users': request.user.__class__.objects.count(),
-                'premium_users': request.user.__class__.objects.filter(
-                    is_premium=True,
-                ).count(),
                 'staff_users': request.user.__class__.objects.filter(
                     is_staff=True,
                 ).count(),
@@ -528,39 +576,11 @@ class AdminDashboardView(APIView):
                 'discussions': Discussion.objects.count(),
                 'discussion_replies': DiscussionReply.objects.count(),
                 'notifications': Notification.objects.count(),
-                'payments': PaymentTransaction.objects.count(),
-                'active_subscriptions': UserSubscription.objects.filter(
-                    is_active=True,
-                ).count(),
-                'revenue': float(
-                    PaymentTransaction.objects.filter(
-                        status=PaymentTransaction.STATUS_COMPLETED,
-                    ).aggregate(total=Sum('amount'))['total'] or 0
-                ),
                 'average_mock_score': round(float(average_score or 0), 2),
             },
-            'users_by_plan': [
-                {
-                    'name': 'Premium',
-                    'value': request.user.__class__.objects.filter(
-                        is_premium=True,
-                    ).count(),
-                },
-                {
-                    'name': 'Free',
-                    'value': request.user.__class__.objects.filter(
-                        is_premium=False,
-                    ).count(),
-                },
-            ],
-            'payment_status': [
-                {'status': status_value, 'count': count}
-                for status_value, count in payment_statuses.items()
-            ],
             'timeline': timeline,
             'questions_by_semester': questions_by_semester,
             'mock_attempts_by_subject': mock_attempts_by_subject,
-            'recent_payments': recent_payments,
             'recent_discussions': recent_discussions,
         })
 
@@ -691,6 +711,134 @@ class AdminSubjectListView(APIView):
         return Response(self.serialize_subject(subject), status=201)
 
 
+class AdminSubjectBulkImportView(APIView):
+    permission_classes = [IsAdminUser]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get_value(self, row, *keys):
+        normalized = {
+            (key or '').strip().lower(): (value or '').strip()
+            for key, value in row.items()
+        }
+
+        for key in keys:
+            value = normalized.get(key)
+            if value:
+                return value
+
+        return ''
+
+    def resolve_semester(self, row, default_semester_id):
+        semester_id = self.get_value(row, 'semester_id')
+        semester_slug = self.get_value(row, 'semester_slug')
+        semester_name = self.get_value(row, 'semester', 'semester_name')
+
+        if semester_id:
+            return Semester.objects.get(pk=semester_id)
+
+        if semester_slug:
+            return Semester.objects.get(slug=semester_slug)
+
+        if semester_name:
+            semester, _ = Semester.objects.get_or_create(name=semester_name)
+            return semester
+
+        if default_semester_id:
+            return Semester.objects.get(pk=default_semester_id)
+
+        raise ValueError('Semester is required.')
+
+    def post(self, request):
+        upload = request.FILES.get('file')
+        default_semester_id = request.data.get('semester_id')
+
+        if not upload:
+            return Response({'detail': 'CSV file is required.'}, status=400)
+
+        try:
+            decoded = upload.read().decode('utf-8-sig')
+        except UnicodeDecodeError:
+            return Response({'detail': 'CSV must be UTF-8 encoded.'}, status=400)
+
+        reader = csv.DictReader(io.StringIO(decoded))
+
+        if not reader.fieldnames:
+            return Response({'detail': 'CSV must include a header row.'}, status=400)
+
+        imported = []
+        errors = []
+        subject_list_view = AdminSubjectListView()
+
+        for index, row in enumerate(reader, start=2):
+            name = self.get_value(row, 'name', 'subject', 'subject_name')
+            slug = self.get_value(row, 'slug', 'subject_slug')
+
+            if not name:
+                errors.append({'row': index, 'error': 'Subject name is required.'})
+                continue
+
+            try:
+                semester = self.resolve_semester(row, default_semester_id)
+            except Semester.DoesNotExist:
+                errors.append({'row': index, 'error': 'Semester was not found.'})
+                continue
+            except ValueError as exc:
+                errors.append({'row': index, 'error': str(exc)})
+                continue
+
+            normalized_slug = slugify(slug) if slug else ''
+            subject = None
+
+            if normalized_slug:
+                subject = Subject.objects.filter(slug=normalized_slug).first()
+
+            if subject is None:
+                subject = Subject.objects.filter(
+                    semester=semester,
+                    name__iexact=name,
+                ).first()
+
+            if subject is None:
+                subject = Subject(name=name, semester=semester)
+            else:
+                subject.name = name
+                subject.semester = semester
+
+            if normalized_slug:
+                subject.slug = normalized_slug
+
+            try:
+                subject.save()
+            except IntegrityError:
+                errors.append({
+                    'row': index,
+                    'error': 'Subject slug already exists for another subject.',
+                })
+                continue
+
+            imported.append(
+                subject_list_view.serialize_subject(
+                    subject_list_view.get_queryset().get(id=subject.id)
+                )
+            )
+
+        if not imported and errors:
+            return Response(
+                {
+                    'imported_count': 0,
+                    'subjects': [],
+                    'errors': errors,
+                },
+                status=400,
+            )
+
+        return Response({
+            'imported_count': len(imported),
+            'subjects': imported,
+            'errors': errors,
+        })
+
+
 class AdminSubjectDetailView(APIView):
     permission_classes = [IsAdminUser]
 
@@ -741,6 +889,475 @@ class AdminSubjectYearListView(APIView):
             }
             for year in years
         ])
+
+
+class AdminSubjectSyllabusView(APIView):
+    permission_classes = [IsAdminUser]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def serialize_unit(self, unit):
+        return {
+            'id': unit.id,
+            'title': unit.title,
+            'slug': unit.slug,
+            'duration': unit.duration,
+            'content': unit.content,
+            'order': unit.order,
+        }
+
+    def serialize_section(self, section):
+        return {
+            'id': section.id,
+            'title': section.title,
+            'content': section.content,
+            'order': section.order,
+        }
+
+    def serialize_syllabus(self, syllabus):
+        return {
+            'id': syllabus.id,
+            'subject_id': syllabus.subject_id,
+            'pdf_file': syllabus.pdf_file.url if syllabus.pdf_file else None,
+            'course_title': syllabus.course_title,
+            'course_no': syllabus.course_no,
+            'semester_label': syllabus.semester_label,
+            'nature': syllabus.nature,
+            'full_marks': syllabus.full_marks,
+            'pass_marks': syllabus.pass_marks,
+            'credit_hours': syllabus.credit_hours,
+            'course_description': syllabus.course_description,
+            'course_objective': syllabus.course_objective,
+            'laboratory_work': syllabus.laboratory_work,
+            'text_books': syllabus.text_books,
+            'reference_books': syllabus.reference_books,
+            'units': [self.serialize_unit(unit) for unit in syllabus.units.all()],
+            'sections': [self.serialize_section(section) for section in syllabus.sections.all()],
+        }
+
+    def get_syllabus(self, pk):
+        subject = get_object_or_404(Subject, pk=pk)
+        syllabus, _ = Syllabus.objects.get_or_create(subject=subject)
+        return Syllabus.objects.prefetch_related('units', 'sections').get(pk=syllabus.pk)
+
+    def get(self, request, pk):
+        return Response(self.serialize_syllabus(self.get_syllabus(pk)))
+
+    def patch(self, request, pk):
+        syllabus = self.get_syllabus(pk)
+        fields = [
+            'course_title',
+            'course_no',
+            'semester_label',
+            'nature',
+            'full_marks',
+            'pass_marks',
+            'credit_hours',
+            'course_description',
+            'course_objective',
+            'laboratory_work',
+            'text_books',
+            'reference_books',
+        ]
+
+        for field in fields:
+            if field in request.data:
+                setattr(syllabus, field, (request.data.get(field) or '').strip())
+
+        pdf_file = request.FILES.get('pdf_file')
+        if pdf_file:
+            if not pdf_file.name.lower().endswith('.pdf'):
+                return Response({'detail': 'Only PDF syllabus files are allowed.'}, status=400)
+            syllabus.pdf_file = pdf_file
+
+        syllabus.save()
+        return Response(self.serialize_syllabus(self.get_syllabus(pk)))
+
+
+class AdminSubjectSyllabusCsvImportView(APIView):
+    permission_classes = [IsAdminUser]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request, pk):
+        subject = get_object_or_404(Subject.objects.select_related('semester'), pk=pk)
+        csv_file = request.FILES.get('file')
+        if not csv_file:
+            return Response({'detail': 'CSV file is required.'}, status=400)
+        if not csv_file.name.lower().endswith('.csv'):
+            return Response({'detail': 'Only CSV files are allowed.'}, status=400)
+
+        rows = read_uploaded_csv(csv_file)
+        subject_rows = choose_subject_csv_rows(subject, rows)
+        if not subject_rows:
+            return Response({'detail': 'No rows in this CSV match the selected subject.'}, status=400)
+
+        first_row = subject_rows[0]
+        imported_units = 0
+        imported_sections = 0
+
+        with transaction.atomic():
+            syllabus, _ = Syllabus.objects.get_or_create(subject=subject)
+            syllabus.course_title = clean_csv_value(first_row.get('course_title')) or subject.name
+            syllabus.course_no = clean_csv_value(first_row.get('course_code'))
+            syllabus.semester_label = clean_csv_value(first_row.get('semester'))
+            syllabus.nature = clean_csv_value(first_row.get('nature'))
+            syllabus.full_marks = clean_csv_value(first_row.get('full_marks'))
+            syllabus.pass_marks = clean_csv_value(first_row.get('pass_marks'))
+            syllabus.credit_hours = clean_csv_value(first_row.get('credit_hrs'))
+            syllabus.course_description = ''
+            syllabus.course_objective = ''
+            syllabus.laboratory_work = ''
+            syllabus.text_books = ''
+            syllabus.reference_books = ''
+            syllabus.save()
+
+            syllabus.units.all().delete()
+            syllabus.sections.all().delete()
+
+            section_order = 1
+            used_slugs = set()
+            for row in subject_rows:
+                section = clean_csv_value(row.get('section'))
+                section_key = section.lower()
+                content = clean_csv_value(row.get('content'))
+
+                if section_key == 'course contents':
+                    unit_no = clean_csv_value(row.get('unit_no'))
+                    unit_title = clean_csv_value(row.get('unit_title')) or f'Unit {unit_no}'
+                    if not unit_no:
+                        continue
+
+                    SyllabusUnit.objects.create(
+                        syllabus=syllabus,
+                        title=unit_title,
+                        slug=unique_syllabus_unit_slug(syllabus, unit_title, used_slugs),
+                        duration=clean_csv_value(row.get('hours')),
+                        content=content,
+                        order=parse_csv_order(unit_no),
+                    )
+                    imported_units += 1
+                    continue
+
+                field_name = SYLLABUS_FIELD_SECTIONS.get(section_key)
+                if field_name:
+                    setattr(syllabus, field_name, append_csv_text(getattr(syllabus, field_name), content))
+                    continue
+
+                if content:
+                    SyllabusSection.objects.create(
+                        syllabus=syllabus,
+                        title=section,
+                        content=content,
+                        order=section_order,
+                    )
+                    imported_sections += 1
+                    section_order += 1
+
+            syllabus.save()
+
+        return Response({
+            'imported_units': imported_units,
+            'imported_sections': imported_sections,
+            'syllabus_id': syllabus.id,
+        })
+
+
+class AdminSyllabusUnitListView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def serialize_unit(self, unit):
+        return {
+            'id': unit.id,
+            'title': unit.title,
+            'slug': unit.slug,
+            'duration': unit.duration,
+            'content': unit.content,
+            'order': unit.order,
+        }
+
+    def get_syllabus(self, subject_pk):
+        subject = get_object_or_404(Subject, pk=subject_pk)
+        syllabus, _ = Syllabus.objects.get_or_create(subject=subject)
+        return syllabus
+
+    def post(self, request, pk):
+        syllabus = self.get_syllabus(pk)
+        title = (request.data.get('title') or '').strip()
+        slug = (request.data.get('slug') or '').strip()
+        duration = (request.data.get('duration') or '').strip()
+        content = (request.data.get('content') or '').strip()
+        order = request.data.get('order') or 0
+
+        if not title:
+            return Response({'detail': 'Unit title is required.'}, status=400)
+
+        unit = SyllabusUnit(
+            syllabus=syllabus,
+            title=title,
+            duration=duration,
+            content=content,
+            order=order,
+        )
+        if slug:
+            unit.slug = slugify(slug)
+        unit.save()
+        return Response(self.serialize_unit(unit), status=201)
+
+
+class AdminSyllabusUnitDetailView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def serialize_unit(self, unit):
+        return {
+            'id': unit.id,
+            'title': unit.title,
+            'slug': unit.slug,
+            'duration': unit.duration,
+            'content': unit.content,
+            'order': unit.order,
+        }
+
+    def patch(self, request, pk):
+        unit = get_object_or_404(SyllabusUnit, pk=pk)
+        for field in ['title', 'duration', 'content']:
+            if field in request.data:
+                setattr(unit, field, (request.data.get(field) or '').strip())
+        if 'slug' in request.data:
+            unit.slug = slugify((request.data.get('slug') or '').strip())
+        if 'order' in request.data:
+            unit.order = request.data.get('order') or 0
+        unit.save()
+        return Response(self.serialize_unit(unit))
+
+    def delete(self, request, pk):
+        unit = get_object_or_404(SyllabusUnit, pk=pk)
+        unit.delete()
+        return Response(status=204)
+
+
+class AdminSubjectNoteListView(APIView):
+    permission_classes = [IsAdminUser]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def serialize_note(self, note):
+        return {
+            'id': note.id,
+            'subject_id': note.subject_id,
+            'title': note.title,
+            'slug': note.slug,
+            'body': note.body,
+            'pdf_file': note.pdf_file.url if note.pdf_file else None,
+            'unit': note.unit_id,
+            'unit_slug': note.unit.slug if note.unit else '',
+            'unit_title': note.unit.title if note.unit else '',
+            'unit_duration': note.unit.duration if note.unit else '',
+            'unit_content': note.unit.content if note.unit else '',
+            'credit_name': note.credit_name,
+            'credit_url': note.credit_url,
+            'credit_image': note.credit_image.url if note.credit_image else None,
+            'order': note.order,
+            'is_published': note.is_published,
+            'updated_at': note.updated_at,
+        }
+
+    def get(self, request, pk):
+        subject = get_object_or_404(Subject, pk=pk)
+        notes = Note.objects.filter(subject=subject).select_related('unit')
+        return Response([self.serialize_note(note) for note in notes])
+
+    def post(self, request, pk):
+        subject = get_object_or_404(Subject, pk=pk)
+        pdf_file = request.FILES.get('pdf_file')
+        unit_id = request.data.get('unit') or None
+        credit_name = (request.data.get('credit_name') or '').strip()
+        credit_url = (request.data.get('credit_url') or '').strip()
+        credit_image = request.FILES.get('credit_image')
+
+        if not pdf_file:
+            return Response({'detail': 'Note PDF file is required.'}, status=400)
+        pdf_error = validate_pdf_upload(pdf_file)
+        if pdf_error:
+            return Response({'detail': pdf_error}, status=400)
+
+        if not unit_id:
+            return Response({'detail': 'Choose a syllabus chapter for this note.'}, status=400)
+        unit = get_object_or_404(SyllabusUnit, pk=unit_id, syllabus__subject=subject)
+
+        title = derive_note_title(subject, unit, pdf_file)
+        slug = build_note_slug(subject, unit, title)
+        note, _ = Note.objects.update_or_create(
+            subject=subject,
+            slug=slug,
+            defaults={
+                'unit': unit,
+                'title': title,
+                'body': '',
+                'pdf_file': pdf_file,
+                'credit_name': credit_name,
+                'credit_url': credit_url,
+                'credit_image': credit_image,
+                'order': unit.order,
+                'is_published': True,
+            },
+        )
+        return Response(self.serialize_note(note), status=201)
+
+
+class AdminSubjectNoteCsvImportView(APIView):
+    permission_classes = [IsAdminUser]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def find_unit(self, subject, row):
+        unit_id = clean_csv_value(row.get('unit_id'))
+        if unit_id:
+            return get_object_or_404(SyllabusUnit, pk=unit_id, syllabus__subject=subject)
+
+        syllabus = Syllabus.objects.filter(subject=subject).first()
+        if not syllabus:
+            return None
+
+        unit_slug = clean_csv_value(row.get('unit_slug'))
+        if unit_slug:
+            unit = SyllabusUnit.objects.filter(syllabus=syllabus, slug=slugify(unit_slug)).first()
+            if unit:
+                return unit
+
+        unit_no = clean_csv_value(row.get('unit_no'))
+        if unit_no:
+            unit = SyllabusUnit.objects.filter(syllabus=syllabus, order=parse_csv_order(unit_no)).first()
+            if unit:
+                return unit
+
+        unit_title = clean_csv_value(row.get('unit_title'))
+        if unit_title:
+            target = normalize_course_match(unit_title)
+            for unit in SyllabusUnit.objects.filter(syllabus=syllabus):
+                if normalize_course_match(unit.title) == target:
+                    return unit
+
+        return None
+
+    def post(self, request, pk):
+        subject = get_object_or_404(Subject, pk=pk)
+        csv_file = request.FILES.get('file')
+        if not csv_file:
+            return Response({'detail': 'CSV file is required.'}, status=400)
+        if not csv_file.name.lower().endswith('.csv'):
+            return Response({'detail': 'Only CSV files are allowed.'}, status=400)
+
+        rows = choose_subject_csv_rows(subject, read_uploaded_csv(csv_file))
+        if not rows:
+            return Response({'detail': 'No rows in this CSV match the selected subject.'}, status=400)
+
+        imported_count = 0
+        errors = []
+
+        for index, row in enumerate(rows, start=2):
+            section = clean_csv_value(row.get('section')).lower()
+            title = (
+                clean_csv_value(row.get('title'))
+                or clean_csv_value(row.get('note_title'))
+                or clean_csv_value(row.get('unit_title'))
+            )
+            body = (
+                clean_csv_value(row.get('body'))
+                or clean_csv_value(row.get('note'))
+                or clean_csv_value(row.get('content'))
+            )
+
+            if section and section != 'course contents' and not clean_csv_value(row.get('title')) and not clean_csv_value(row.get('note_title')):
+                continue
+            if not title or not body:
+                if body or title:
+                    errors.append({'row': index, 'error': 'Both title and body/content are required.'})
+                continue
+
+            unit = self.find_unit(subject, row)
+            slug = slugify(clean_csv_value(row.get('slug')) or title)
+            order = parse_csv_order(row.get('order') or row.get('unit_no'))
+            is_published = parse_csv_bool(row.get('is_published'), default=True)
+
+            Note.objects.update_or_create(
+                subject=subject,
+                slug=slug,
+                defaults={
+                    'unit': unit,
+                    'title': title,
+                    'body': body,
+                    'order': order,
+                    'is_published': is_published,
+                },
+            )
+            imported_count += 1
+
+        return Response({
+            'imported_count': imported_count,
+            'errors': errors,
+        })
+
+
+class AdminNoteDetailView(APIView):
+    permission_classes = [IsAdminUser]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def serialize_note(self, note):
+        return {
+            'id': note.id,
+            'subject_id': note.subject_id,
+            'title': note.title,
+            'slug': note.slug,
+            'body': note.body,
+            'pdf_file': note.pdf_file.url if note.pdf_file else None,
+            'unit': note.unit_id,
+            'unit_slug': note.unit.slug if note.unit else '',
+            'unit_title': note.unit.title if note.unit else '',
+            'unit_duration': note.unit.duration if note.unit else '',
+            'unit_content': note.unit.content if note.unit else '',
+            'credit_name': note.credit_name,
+            'credit_url': note.credit_url,
+            'credit_image': note.credit_image.url if note.credit_image else None,
+            'order': note.order,
+            'is_published': note.is_published,
+            'updated_at': note.updated_at,
+        }
+
+    def patch(self, request, pk):
+        note = get_object_or_404(Note.objects.select_related('subject', 'unit'), pk=pk)
+        pdf_file = request.FILES.get('pdf_file')
+        credit_image = request.FILES.get('credit_image')
+        pdf_error = validate_pdf_upload(pdf_file)
+        if pdf_error:
+            return Response({'detail': pdf_error}, status=400)
+        if pdf_file:
+            note.pdf_file = pdf_file
+        if credit_image:
+            note.credit_image = credit_image
+        if 'credit_name' in request.data:
+            note.credit_name = (request.data.get('credit_name') or '').strip()
+        if 'credit_url' in request.data:
+            note.credit_url = (request.data.get('credit_url') or '').strip()
+        if 'unit' in request.data:
+            unit_id = request.data.get('unit') or None
+            note.unit = (
+                get_object_or_404(SyllabusUnit, pk=unit_id, syllabus__subject=note.subject)
+                if unit_id
+                else None
+            )
+        if not note.pdf_file:
+            return Response({'detail': 'Note PDF file is required.'}, status=400)
+        note.title = derive_note_title(note.subject, note.unit, note.pdf_file)
+        note.slug = build_note_slug(note.subject, note.unit, note.title)
+        if Note.objects.filter(subject=note.subject, slug=note.slug).exclude(pk=note.pk).exists():
+            return Response({'detail': 'A note already exists for this chapter.'}, status=400)
+        note.body = ''
+        note.order = note.unit.order if note.unit else 0
+        note.is_published = True
+        note.save()
+        return Response(self.serialize_note(Note.objects.select_related('unit').get(pk=note.pk)))
+
+    def delete(self, request, pk):
+        note = get_object_or_404(Note, pk=pk)
+        note.delete()
+        return Response(status=204)
 
 
 class AdminQuestionListView(APIView):
@@ -1190,21 +1807,30 @@ class AdminUserListView(APIView):
     permission_classes = [IsAdminUser]
 
     def serialize_user(self, user):
+        user.refresh_expired_suspension(save=True)
         return {
             'id': user.id,
             'username': user.username,
             'email': user.email,
             'is_staff': user.is_staff,
             'is_superuser': user.is_superuser,
-            'is_premium': user.is_premium,
-            'premium_expires_at': user.premium_expires_at,
+            'is_active': user.is_active,
+            'account_status': user.account_status,
+            'suspended_until': user.suspended_until,
             'date_joined': user.date_joined,
             'last_login': user.last_login,
-            'current_plan': user.current_plan.name if user.current_plan else '',
         }
 
     def get(self, request):
-        users = request.user.__class__.objects.select_related('current_plan').order_by('-date_joined')
+        request.user.__class__.objects.filter(
+            account_status=request.user.__class__.STATUS_SUSPENDED,
+            suspended_until__lte=timezone.now(),
+        ).update(
+            account_status=request.user.__class__.STATUS_ACTIVE,
+            is_active=True,
+            suspended_until=None,
+        )
+        users = request.user.__class__.objects.order_by('-date_joined')
         return Response([self.serialize_user(user) for user in users[:250]])
 
 
@@ -1213,42 +1839,111 @@ class AdminUserDetailView(APIView):
 
     def patch(self, request, pk):
         user = get_object_or_404(request.user.__class__, pk=pk)
+        if user.is_superuser and not request.user.is_superuser:
+            return Response(
+                {'detail': 'Only a superuser can change a superuser account.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
-        for field in ['is_staff', 'is_premium']:
-            if field in request.data:
-                setattr(user, field, bool(request.data.get(field)))
+        if 'is_staff' in request.data or 'is_superuser' in request.data:
+            return Response(
+                {'detail': 'Staff access cannot be changed from this endpoint.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        premium_expires_at = request.data.get('premium_expires_at')
-        if premium_expires_at == '':
-            user.premium_expires_at = None
+        update_fields = []
 
-        user.save(update_fields=['is_staff', 'is_premium', 'premium_expires_at'])
+        account_status = request.data.get('account_status') or request.data.get('action')
+        if account_status:
+            account_status = str(account_status).strip().lower()
+            account_status = {
+                'activate': request.user.__class__.STATUS_ACTIVE,
+                'suspend': request.user.__class__.STATUS_SUSPENDED,
+                'block': request.user.__class__.STATUS_BLOCKED,
+            }.get(account_status, account_status)
+            if account_status not in {
+                request.user.__class__.STATUS_ACTIVE,
+                request.user.__class__.STATUS_SUSPENDED,
+                request.user.__class__.STATUS_BLOCKED,
+            }:
+                return Response(
+                    {'detail': 'Use active, suspended, blocked, activate, suspend, or block.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if user == request.user and account_status != request.user.__class__.STATUS_ACTIVE:
+                return Response(
+                    {'detail': 'You cannot suspend or block your own account.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            suspended_until = None
+            if account_status == request.user.__class__.STATUS_SUSPENDED:
+                suspend_days_value = request.data.get('suspend_days')
+                if suspend_days_value not in [None, '']:
+                    try:
+                        suspend_days = int(suspend_days_value)
+                    except (TypeError, ValueError):
+                        return Response(
+                            {'detail': 'suspend_days must be a whole number.'},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    if suspend_days < 1 or suspend_days > 3650:
+                        return Response(
+                            {'detail': 'suspend_days must be between 1 and 3650.'},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    suspended_until = timezone.now() + timezone.timedelta(
+                        days=suspend_days,
+                    )
+                else:
+                    suspended_until_value = (request.data.get('suspended_until') or '').strip()
+
+                if suspended_until is None and suspended_until_value:
+                    suspended_until = parse_datetime(suspended_until_value)
+                    if suspended_until is None:
+                        return Response(
+                            {'detail': 'suspended_until must be a valid ISO date-time.'},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    if timezone.is_naive(suspended_until):
+                        suspended_until = timezone.make_aware(
+                            suspended_until,
+                            timezone.get_current_timezone(),
+                        )
+                    if suspended_until <= timezone.now():
+                        return Response(
+                            {'detail': 'suspended_until must be in the future.'},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+
+            user.set_account_status(account_status, suspended_until=suspended_until)
+            update_fields.extend([
+                'account_status',
+                'is_active',
+                'active_token',
+                'suspended_until',
+            ])
+
+        if not update_fields:
+            return Response(AdminUserListView().serialize_user(user))
+
+        user.save(update_fields=sorted(set(update_fields)))
         return Response(AdminUserListView().serialize_user(user))
 
+    def delete(self, request, pk):
+        user = get_object_or_404(request.user.__class__, pk=pk)
+        if user == request.user:
+            return Response(
+                {'detail': 'You cannot delete your own account.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if user.is_superuser and not request.user.is_superuser:
+            return Response(
+                {'detail': 'Only a superuser can delete a superuser account.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
-class AdminPaymentListView(APIView):
-    permission_classes = [IsAdminUser]
-
-    def get(self, request):
-        payments = PaymentTransaction.objects.select_related('user', 'plan').order_by('-created_at')[:250]
-        return Response([
-            {
-                'id': payment.id,
-                'username': payment.user.username,
-                'plan': payment.plan.name,
-                'amount': float(payment.amount),
-                'status': payment.status,
-                'payment_method': payment.payment_method,
-                'pidx': payment.pidx,
-                'purchase_order_id': payment.purchase_order_id,
-                'customer_name': payment.customer_name,
-                'customer_email': payment.customer_email,
-                'customer_phone': payment.customer_phone,
-                'created_at': payment.created_at,
-                'completed_at': payment.completed_at,
-            }
-            for payment in payments
-        ])
+        user.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class AdminDiscussionListView(APIView):
@@ -1277,6 +1972,64 @@ class AdminDiscussionDetailView(APIView):
     def delete(self, request, pk):
         discussion = get_object_or_404(Discussion, pk=pk)
         discussion.delete()
+        return Response(status=204)
+
+
+class AdminTestimonialListView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get_queryset(self):
+        return Testimonial.objects.select_related('user', 'reviewed_by')
+
+    def get(self, request):
+        testimonials = self.get_queryset()
+        status_filter = (request.query_params.get('status') or '').strip()
+
+        if status_filter:
+            testimonials = testimonials.filter(status=status_filter)
+
+        serializer = TestimonialSerializer(testimonials[:250], many=True)
+        return Response(serializer.data)
+
+
+class AdminTestimonialDetailView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def patch(self, request, pk):
+        testimonial = get_object_or_404(Testimonial, pk=pk)
+        status_value = (request.data.get('status') or '').strip()
+        valid_statuses = {
+            Testimonial.STATUS_PENDING,
+            Testimonial.STATUS_APPROVED,
+            Testimonial.STATUS_REJECTED,
+        }
+
+        if status_value not in valid_statuses:
+            return Response({'detail': 'A valid status is required.'}, status=400)
+
+        testimonial.status = status_value
+        if status_value == Testimonial.STATUS_PENDING:
+            testimonial.reviewed_by = None
+            testimonial.reviewed_at = None
+        else:
+            testimonial.reviewed_by = request.user
+            testimonial.reviewed_at = timezone.now()
+        testimonial.save(
+            update_fields=[
+                'status',
+                'reviewed_by',
+                'reviewed_at',
+                'updated_at',
+            ]
+        )
+        testimonial = AdminTestimonialListView().get_queryset().get(
+            pk=testimonial.pk,
+        )
+        return Response(TestimonialSerializer(testimonial).data)
+
+    def delete(self, request, pk):
+        testimonial = get_object_or_404(Testimonial, pk=pk)
+        testimonial.delete()
         return Response(status=204)
 
 

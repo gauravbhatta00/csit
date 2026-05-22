@@ -157,7 +157,7 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_ROOT = Path(os.environ.get('DJANGO_MEDIA_ROOT', BASE_DIR / 'media'))
 
 
 STATIC_URL = 'static/'
@@ -185,11 +185,6 @@ SIMPLE_JWT = {
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
-KHALTI_API_BASE_URL = os.environ.get(
-    'KHALTI_API_BASE_URL',
-    'https://dev.khalti.com/api/v2',
-)
-KHALTI_SECRET_KEY = os.environ.get('KHALTI_SECRET_KEY', '')
 FRONTEND_BASE_URL = os.environ.get('FRONTEND_BASE_URL', 'http://localhost:3000')
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '')
 EMAIL_BACKEND = os.environ.get(

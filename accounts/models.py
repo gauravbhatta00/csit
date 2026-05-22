@@ -1,7 +1,8 @@
-from django.db import models
+import math
+
 from django.contrib.auth.models import AbstractUser, BaseUserManager
+from django.db import models
 from django.utils import timezone
-from django.utils.text import slugify
 
 
 class CustomUserManager(BaseUserManager):
@@ -11,7 +12,6 @@ class CustomUserManager(BaseUserManager):
         if not username:
             raise ValueError('Username is required.')
         email = self.normalize_email(email)
-        extra_fields.setdefault('is_premium', False)
         user = self.model(username=username, email=email, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
@@ -20,7 +20,6 @@ class CustomUserManager(BaseUserManager):
     def create_superuser(self, username, email=None, password=None, **extra_fields):
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
-        extra_fields.setdefault('is_premium', True)  # ✅ Superuser gets premium
 
         if not extra_fields.get('is_staff'):
             raise ValueError('Superuser must have is_staff=True.')
@@ -31,169 +30,82 @@ class CustomUserManager(BaseUserManager):
 
 
 class CustomUser(AbstractUser):
-    # ✅ Premium fields directly on user model
+    STATUS_ACTIVE = 'active'
+    STATUS_SUSPENDED = 'suspended'
+    STATUS_BLOCKED = 'blocked'
+
+    ACCOUNT_STATUS_CHOICES = [
+        (STATUS_ACTIVE, 'Active'),
+        (STATUS_SUSPENDED, 'Suspended'),
+        (STATUS_BLOCKED, 'Blocked'),
+    ]
+
     phone = models.CharField(max_length=15, null=True, blank=True)
     profile_picture = models.ImageField(upload_to='profiles/', null=True, blank=True)
     college = models.CharField(max_length=100, null=True, blank=True)
     semester = models.CharField(max_length=20, null=True, blank=True)
     bio = models.TextField(null=True, blank=True)
-    is_premium = models.BooleanField(default=False)
-    premium_expires_at = models.DateTimeField(null=True, blank=True)
     active_token = models.CharField(max_length=255, null=True, blank=True)
-    current_plan = models.ForeignKey(
-        'SubscriptionPlan',
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name='subscribers',
-    )
-
-    objects = CustomUserManager()  # ✅ Use our custom manager
-
-    def is_premium_active(self):
-        """Check if premium is active and not expired."""
-        if not self.is_premium:
-            return False
-        if self.premium_expires_at and self.premium_expires_at < timezone.now():
-            self.is_premium = False
-            self.save()
-            return False
-        return True
-
-    def __str__(self):
-        return f"{self.username} - {'Premium' if self.is_premium else 'Free'}"
-
-
-class SubscriptionPlan(models.Model):
-    BILLING_MONTHLY = 'monthly'
-    BILLING_QUARTERLY = 'quarterly'
-    BILLING_YEARLY = 'yearly'
-    BILLING_CUSTOM = 'custom'
-
-    BILLING_PERIOD_CHOICES = [
-        (BILLING_MONTHLY, 'Monthly'),
-        (BILLING_QUARTERLY, 'Quarterly'),
-        (BILLING_YEARLY, 'Yearly'),
-        (BILLING_CUSTOM, 'Custom'),
-    ]
-
-    name = models.CharField(max_length=80)
-    slug = models.SlugField(unique=True, blank=True)
-    price = models.DecimalField(max_digits=10, decimal_places=2)
-    billing_period = models.CharField(
+    suspended_until = models.DateTimeField(null=True, blank=True)
+    account_status = models.CharField(
         max_length=20,
-        choices=BILLING_PERIOD_CHOICES,
-        default=BILLING_MONTHLY,
+        choices=ACCOUNT_STATUS_CHOICES,
+        default=STATUS_ACTIVE,
     )
-    duration_days = models.PositiveIntegerField(default=30)
-    description = models.TextField(blank=True)
-    features = models.JSONField(default=list, blank=True)
-    is_active = models.BooleanField(default=True)
-    sort_order = models.PositiveSmallIntegerField(default=0)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
-    class Meta:
-        ordering = ['sort_order', 'price']
+    objects = CustomUserManager()
 
-    def save(self, *args, **kwargs):
-        if not self.slug:
-            self.slug = slugify(self.name)
-        super().save(*args, **kwargs)
+    def refresh_expired_suspension(self, save=False):
+        if (
+            self.account_status == self.STATUS_SUSPENDED
+            and self.suspended_until
+            and self.suspended_until <= timezone.now()
+        ):
+            self.account_status = self.STATUS_ACTIVE
+            self.is_active = True
+            self.suspended_until = None
+            if save:
+                self.save(update_fields=['account_status', 'is_active', 'suspended_until'])
+            return True
+        return False
+
+    def suspension_days_remaining(self):
+        if not self.suspended_until:
+            return None
+
+        seconds = max(
+            0,
+            (self.suspended_until - timezone.now()).total_seconds(),
+        )
+        return max(1, math.ceil(seconds / 86400))
+
+    def account_unavailable_message(self):
+        if self.account_status == self.STATUS_SUSPENDED:
+            days = self.suspension_days_remaining()
+            if days:
+                unit = 'day' if days == 1 else 'days'
+                return (
+                    f"Your account is suspended for {days} more {unit}. "
+                    "For more info, contact support."
+                )
+            return "Your account is suspended. For more info, contact support."
+
+        if self.account_status == self.STATUS_BLOCKED:
+            return "Your account is blocked. For more info, contact support."
+
+        return "Your account is not active. For more info, contact support."
+
+    def set_account_status(self, account_status, suspended_until=None):
+        self.account_status = account_status
+        self.is_active = account_status == self.STATUS_ACTIVE
+        self.suspended_until = (
+            suspended_until if account_status == self.STATUS_SUSPENDED else None
+        )
+        if not self.is_active:
+            self.active_token = None
 
     def __str__(self):
-        return f"{self.name} - Rs. {self.price}"
-
-
-class UserSubscription(models.Model):
-    user = models.ForeignKey(
-        CustomUser,
-        on_delete=models.CASCADE,
-        related_name='subscriptions',
-    )
-    plan = models.ForeignKey(
-        SubscriptionPlan,
-        on_delete=models.PROTECT,
-        related_name='subscriptions',
-    )
-    starts_at = models.DateTimeField(default=timezone.now)
-    expires_at = models.DateTimeField(null=True, blank=True)
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ['-starts_at']
-
-    def __str__(self):
-        return f"{self.user.username} - {self.plan.name}"
-
-
-class PaymentTransaction(models.Model):
-    STATUS_INITIATED = 'initiated'
-    STATUS_PENDING = 'pending'
-    STATUS_COMPLETED = 'completed'
-    STATUS_FAILED = 'failed'
-    STATUS_CANCELED = 'canceled'
-    STATUS_EXPIRED = 'expired'
-    STATUS_REFUNDED = 'refunded'
-
-    STATUS_CHOICES = [
-        (STATUS_INITIATED, 'Initiated'),
-        (STATUS_PENDING, 'Pending'),
-        (STATUS_COMPLETED, 'Completed'),
-        (STATUS_FAILED, 'Failed'),
-        (STATUS_CANCELED, 'Canceled'),
-        (STATUS_EXPIRED, 'Expired'),
-        (STATUS_REFUNDED, 'Refunded'),
-    ]
-
-    PAYMENT_METHOD_KHALTI = 'khalti'
-
-    user = models.ForeignKey(
-        CustomUser,
-        on_delete=models.CASCADE,
-        related_name='payment_transactions',
-    )
-    plan = models.ForeignKey(
-        SubscriptionPlan,
-        on_delete=models.PROTECT,
-        related_name='payment_transactions',
-    )
-    subscription = models.ForeignKey(
-        UserSubscription,
-        on_delete=models.SET_NULL,
-        related_name='payment_transactions',
-        null=True,
-        blank=True,
-    )
-    payment_method = models.CharField(max_length=30, default=PAYMENT_METHOD_KHALTI)
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
-    amount_paisa = models.PositiveIntegerField()
-    status = models.CharField(
-        max_length=20,
-        choices=STATUS_CHOICES,
-        default=STATUS_INITIATED,
-    )
-    pidx = models.CharField(max_length=100, unique=True, null=True, blank=True)
-    payment_url = models.URLField(max_length=500, blank=True)
-    khalti_transaction_id = models.CharField(max_length=100, blank=True)
-    purchase_order_id = models.CharField(max_length=80, unique=True)
-    purchase_order_name = models.CharField(max_length=160)
-    customer_name = models.CharField(max_length=150)
-    customer_email = models.EmailField(blank=True)
-    customer_phone = models.CharField(max_length=30, blank=True)
-    raw_initiate_response = models.JSONField(default=dict, blank=True)
-    raw_lookup_response = models.JSONField(default=dict, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-    completed_at = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        ordering = ['-created_at']
-
-    def __str__(self):
-        return f"{self.user.username} - {self.plan.name} - {self.status}"
+        return self.username
 
 
 class ContactMessage(models.Model):
@@ -223,19 +135,67 @@ class EmailSubscription(models.Model):
         return self.email
 
 
+class Testimonial(models.Model):
+    STATUS_PENDING = 'pending'
+    STATUS_APPROVED = 'approved'
+    STATUS_REJECTED = 'rejected'
+
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_APPROVED, 'Approved'),
+        (STATUS_REJECTED, 'Rejected'),
+    ]
+
+    user = models.ForeignKey(
+        CustomUser,
+        on_delete=models.SET_NULL,
+        related_name='testimonials',
+        null=True,
+        blank=True,
+    )
+    name = models.CharField(max_length=120)
+    role = models.CharField(max_length=120, blank=True)
+    rating = models.PositiveSmallIntegerField(default=5)
+    review = models.TextField()
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=STATUS_PENDING,
+    )
+    reviewed_by = models.ForeignKey(
+        CustomUser,
+        on_delete=models.SET_NULL,
+        related_name='reviewed_testimonials',
+        null=True,
+        blank=True,
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user'],
+                condition=models.Q(user__isnull=False),
+                name='unique_testimonial_per_user',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.name} - {self.rating}/5 - {self.status}"
+
+
 class Notification(models.Model):
     TYPE_REPLY = 'reply'
     TYPE_PAPER = 'paper'
     TYPE_MOCK_TEST = 'mock_test'
-    TYPE_PREMIUM_EXPIRY = 'premium_expiry'
-    TYPE_PAYMENT = 'payment'
 
     TYPE_CHOICES = [
         (TYPE_REPLY, 'Discussion Reply'),
         (TYPE_PAPER, 'New Question Paper'),
         (TYPE_MOCK_TEST, 'New Mock Test'),
-        (TYPE_PREMIUM_EXPIRY, 'Premium Expiring'),
-        (TYPE_PAYMENT, 'Payment'),
     ]
 
     user = models.ForeignKey(

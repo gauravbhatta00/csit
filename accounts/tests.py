@@ -1,3 +1,4 @@
+import tempfile
 from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
@@ -5,14 +6,15 @@ from django.contrib.auth.tokens import default_token_generator
 from django.core import mail
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
+from django.utils import timezone
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import AccessToken
 
-from academics.models import AnswerContribution, Question, Semester, Subject, Year
-from .models import ContactMessage, EmailSubscription
+from academics.models import AnswerContribution, Note, Question, Semester, Subject, Syllabus, SyllabusSection, SyllabusUnit, Year
+from .models import ContactMessage, EmailSubscription, Testimonial
 
 User = get_user_model()
 
@@ -61,6 +63,23 @@ class AuthApiTests(APITestCase):
         self.assertEqual(self.user.active_token, refreshed_access['jti'])
         self.assertNotEqual(self.user.active_token, original_jti)
 
+    def test_suspended_user_login_returns_remaining_days_message(self):
+        self.user.set_account_status(
+            User.STATUS_SUSPENDED,
+            suspended_until=timezone.now() + timezone.timedelta(days=3),
+        )
+        self.user.save(update_fields=['account_status', 'is_active', 'active_token', 'suspended_until'])
+
+        response = self.client.post(
+            '/api/accounts/jwt/create/',
+            {'username': 'student', 'password': 'pass12345'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertIn('suspended for 3 more days', str(response.data['detail']))
+        self.assertIn('contact support', str(response.data['detail']))
+
     def test_profile_requires_authentication(self):
         response = self.client.get('/api/accounts/profile/')
 
@@ -88,6 +107,167 @@ class AuthApiTests(APITestCase):
         self.assertIn('totals', response.data)
         self.assertIn('timeline', response.data)
         self.assertEqual(response.data['totals']['users'], 2)
+
+    def test_admin_user_patch_does_not_allow_staff_promotion(self):
+        staff = User.objects.create_user(
+            username='staff-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        self.client.force_authenticate(user=staff)
+
+        response = self.client.patch(
+            f'/api/accounts/admin/users/{self.user.id}/',
+            {'is_staff': True},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.user.refresh_from_db()
+        self.assertFalse(self.user.is_staff)
+
+    def test_admin_can_suspend_block_and_activate_user(self):
+        staff = User.objects.create_user(
+            username='access-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        self.user.active_token = 'old-token'
+        self.user.save(update_fields=['active_token'])
+        self.client.force_authenticate(user=staff)
+
+        suspend_response = self.client.patch(
+            f'/api/accounts/admin/users/{self.user.id}/',
+            {'action': 'suspend'},
+            format='json',
+        )
+        self.user.refresh_from_db()
+        self.assertEqual(suspend_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.user.account_status, User.STATUS_SUSPENDED)
+        self.assertFalse(self.user.is_active)
+        self.assertIsNone(self.user.active_token)
+
+        block_response = self.client.patch(
+            f'/api/accounts/admin/users/{self.user.id}/',
+            {'action': 'block'},
+            format='json',
+        )
+        self.user.refresh_from_db()
+        self.assertEqual(block_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.user.account_status, User.STATUS_BLOCKED)
+        self.assertFalse(self.user.is_active)
+
+        activate_response = self.client.patch(
+            f'/api/accounts/admin/users/{self.user.id}/',
+            {'action': 'activate'},
+            format='json',
+        )
+        self.user.refresh_from_db()
+        self.assertEqual(activate_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.user.account_status, User.STATUS_ACTIVE)
+        self.assertTrue(self.user.is_active)
+        self.assertIsNone(self.user.suspended_until)
+
+    def test_admin_can_suspend_user_for_number_of_days(self):
+        staff = User.objects.create_user(
+            username='timed-access-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        before_request = timezone.now()
+        self.client.force_authenticate(user=staff)
+
+        response = self.client.patch(
+            f'/api/accounts/admin/users/{self.user.id}/',
+            {
+                'action': 'suspend',
+                'suspend_days': 3,
+            },
+            format='json',
+        )
+
+        self.user.refresh_from_db()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.user.account_status, User.STATUS_SUSPENDED)
+        self.assertFalse(self.user.is_active)
+        self.assertIsNotNone(self.user.suspended_until)
+        self.assertGreaterEqual(
+            self.user.suspended_until,
+            before_request + timezone.timedelta(days=3, seconds=-5),
+        )
+        self.assertIsNotNone(response.data['suspended_until'])
+
+    def test_admin_rejects_invalid_suspend_days(self):
+        staff = User.objects.create_user(
+            username='invalid-days-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        self.client.force_authenticate(user=staff)
+
+        response = self.client.patch(
+            f'/api/accounts/admin/users/{self.user.id}/',
+            {
+                'action': 'suspend',
+                'suspend_days': 0,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_expired_suspension_auto_activates_on_admin_user_list(self):
+        staff = User.objects.create_user(
+            username='expiry-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        self.user.account_status = User.STATUS_SUSPENDED
+        self.user.is_active = False
+        self.user.suspended_until = timezone.now() - timezone.timedelta(minutes=1)
+        self.user.save(update_fields=['account_status', 'is_active', 'suspended_until'])
+        self.client.force_authenticate(user=staff)
+
+        response = self.client.get('/api/accounts/admin/users/')
+
+        self.user.refresh_from_db()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.user.account_status, User.STATUS_ACTIVE)
+        self.assertTrue(self.user.is_active)
+        self.assertIsNone(self.user.suspended_until)
+
+    def test_admin_can_delete_user(self):
+        staff = User.objects.create_user(
+            username='delete-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        target = User.objects.create_user(username='delete-me', password='pass12345')
+        self.client.force_authenticate(user=staff)
+
+        response = self.client.delete(f'/api/accounts/admin/users/{target.id}/')
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(User.objects.filter(id=target.id).exists())
+
+    def test_admin_cannot_suspend_or_delete_self(self):
+        staff = User.objects.create_user(
+            username='self-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        self.client.force_authenticate(user=staff)
+
+        suspend_response = self.client.patch(
+            f'/api/accounts/admin/users/{staff.id}/',
+            {'action': 'suspend'},
+            format='json',
+        )
+        delete_response = self.client.delete(f'/api/accounts/admin/users/{staff.id}/')
+
+        self.assertEqual(suspend_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(delete_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(User.objects.filter(id=staff.id).exists())
 
     def test_admin_semester_and_subject_lists_require_staff_user(self):
         self.client.force_authenticate(user=self.user)
@@ -138,6 +318,108 @@ class AuthApiTests(APITestCase):
         self.assertEqual(question_response.data['subject'], 'Artificial Intelligence')
         self.assertEqual(question_response.data['year'], '2081')
 
+    def test_staff_user_can_upload_subject_syllabus_pdf(self):
+        staff = User.objects.create_user(
+            username='syllabus-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        self.client.force_authenticate(user=staff)
+        semester = Semester.objects.create(name='Semester 1')
+        subject = Subject.objects.create(semester=semester, name='Physics')
+        pdf_file = SimpleUploadedFile(
+            'physics-syllabus.pdf',
+            b'%PDF-1.4\n%test\n',
+            content_type='application/pdf',
+        )
+
+        with tempfile.TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root):
+                response = self.client.patch(
+                    f'/api/accounts/admin/subjects/{subject.id}/syllabus/',
+                    {
+                        'course_title': 'Physics',
+                        'pdf_file': pdf_file,
+                    },
+                    format='multipart',
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertTrue(response.data['pdf_file'].endswith('.pdf'))
+                self.assertTrue(
+                    Syllabus.objects.get(subject=subject).pdf_file.name.startswith('syllabus/')
+                )
+
+    def test_staff_user_can_import_subject_syllabus_csv(self):
+        staff = User.objects.create_user(
+            username='syllabus-csv-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        self.client.force_authenticate(user=staff)
+        semester = Semester.objects.create(name='Semester 1')
+        subject = Subject.objects.create(semester=semester, name='C Programming')
+        csv_file = SimpleUploadedFile(
+            'c_programming.csv',
+            (
+                'semester,course_code,course_title,credit_hrs,full_marks,pass_marks,nature,section,unit_no,unit_title,hours,content\n'
+                'I,CSC115,C Programming,3,60 + 20 + 20,24 + 8 + 8,Theory + Lab,Course Description,,,,Structured C programming.\n'
+                'I,CSC115,C Programming,3,60 + 20 + 20,24 + 8 + 8,Theory + Lab,Course Contents,1,Problem Solving,2 Hrs.,Algorithms and flowcharts.\n'
+                'I,CSC115,C Programming,3,60 + 20 + 20,24 + 8 + 8,Theory + Lab,Recommended Books,,,,Extra book.\n'
+            ).encode('utf-8'),
+            content_type='text/csv',
+        )
+
+        response = self.client.post(
+            f'/api/accounts/admin/subjects/{subject.id}/syllabus/import-csv/',
+            {'file': csv_file},
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['imported_units'], 1)
+        syllabus = Syllabus.objects.get(subject=subject)
+        self.assertEqual(syllabus.course_no, 'CSC115')
+        self.assertEqual(syllabus.units.get().title, 'Problem Solving')
+        self.assertEqual(SyllabusSection.objects.get(syllabus=syllabus).title, 'Recommended Books')
+
+    def test_staff_user_can_import_subject_notes_csv(self):
+        staff = User.objects.create_user(
+            username='notes-csv-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        self.client.force_authenticate(user=staff)
+        semester = Semester.objects.create(name='Semester 1')
+        subject = Subject.objects.create(semester=semester, name='C Programming')
+        syllabus = Syllabus.objects.create(subject=subject, course_title='C Programming', course_no='CSC115')
+        unit = SyllabusUnit.objects.create(
+            syllabus=syllabus,
+            title='Problem Solving',
+            slug='problem-solving',
+            order=1,
+        )
+        csv_file = SimpleUploadedFile(
+            'notes.csv',
+            (
+                'course_code,course_title,unit_no,title,body,order,is_published\n'
+                'CSC115,C Programming,1,Algorithm notes,Steps for problem solving.,1,true\n'
+            ).encode('utf-8'),
+            content_type='text/csv',
+        )
+
+        response = self.client.post(
+            f'/api/accounts/admin/subjects/{subject.id}/notes/import-csv/',
+            {'file': csv_file},
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['imported_count'], 1)
+        note = Note.objects.get(subject=subject)
+        self.assertEqual(note.unit, unit)
+        self.assertEqual(note.title, 'Algorithm notes')
+
     def test_staff_user_can_bulk_import_questions_from_csv(self):
         staff = User.objects.create_user(
             username='bulk-admin',
@@ -181,6 +463,41 @@ class AuthApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['imported_count'], 2)
         self.assertEqual(response.data['errors'], [])
+
+    def test_staff_user_can_bulk_import_subjects_from_csv(self):
+        staff = User.objects.create_user(
+            username='subject-bulk-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        self.client.force_authenticate(user=staff)
+        semester = Semester.objects.create(name='Semester 4')
+        csv_file = SimpleUploadedFile(
+            'subjects.csv',
+            (
+                'name,slug\n'
+                'Database Management System,dbms\n'
+                'Theory of Computation,toc\n'
+            ).encode('utf-8'),
+            content_type='text/csv',
+        )
+
+        response = self.client.post(
+            '/api/accounts/admin/subjects/bulk-import/',
+            {
+                'file': csv_file,
+                'semester_id': semester.id,
+            },
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['imported_count'], 2)
+        self.assertEqual(response.data['errors'], [])
+        self.assertEqual(
+            Subject.objects.filter(semester=semester).count(),
+            2,
+        )
 
     def test_staff_user_can_bulk_import_main_py_question_and_answer_csvs(self):
         staff = User.objects.create_user(
@@ -304,6 +621,38 @@ class AuthApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(EmailSubscription.objects.count(), 1)
         self.assertTrue(EmailSubscription.objects.get().is_active)
+
+    def test_user_can_only_have_one_testimonial_and_can_edit_it(self):
+        self.client.force_authenticate(user=self.user)
+
+        create_response = self.client.post(
+            '/api/accounts/testimonials/',
+            {
+                'role': 'Third semester student',
+                'rating': 4,
+                'review': 'This helped me find past questions quickly.',
+            },
+            format='json',
+        )
+        update_response = self.client.post(
+            '/api/accounts/testimonials/',
+            {
+                'role': 'Fourth semester student',
+                'rating': 5,
+                'review': 'Updated review after using the mock tests too.',
+            },
+            format='json',
+        )
+        mine_response = self.client.get('/api/accounts/testimonials/?mine=1')
+
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(update_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Testimonial.objects.filter(user=self.user).count(), 1)
+        testimonial = Testimonial.objects.get(user=self.user)
+        self.assertEqual(testimonial.role, 'Fourth semester student')
+        self.assertEqual(testimonial.rating, 5)
+        self.assertEqual(testimonial.status, Testimonial.STATUS_PENDING)
+        self.assertEqual(mine_response.data['id'], testimonial.id)
 
     @override_settings(
         EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',

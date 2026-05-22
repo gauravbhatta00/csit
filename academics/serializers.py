@@ -3,6 +3,7 @@ from .models import (
     Semester,
     Subject,
     Syllabus,
+    Note,
     Year,
     Discussion,
     DiscussionReply,
@@ -14,13 +15,48 @@ from .models import (
     AnswerContribution,
     QuestionPaper,
     QuestionSection,
+    SyllabusSection,
+    SyllabusUnit,
 )
 
 
+class SyllabusUnitSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SyllabusUnit
+        fields = ['id', 'title', 'slug', 'duration', 'content', 'order']
+
+
+class SyllabusSectionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SyllabusSection
+        fields = ['id', 'title', 'content', 'order']
+
+
 class SyllabusSerializer(serializers.ModelSerializer):
+    units = SyllabusUnitSerializer(many=True, read_only=True)
+    sections = SyllabusSectionSerializer(many=True, read_only=True)
+
     class Meta:
         model = Syllabus
-        fields = ['id', 'pdf_file', 'updated_at']
+        fields = [
+            'id',
+            'pdf_file',
+            'course_title',
+            'course_no',
+            'semester_label',
+            'nature',
+            'full_marks',
+            'pass_marks',
+            'credit_hours',
+            'course_description',
+            'course_objective',
+            'laboratory_work',
+            'text_books',
+            'reference_books',
+            'units',
+            'sections',
+            'updated_at',
+        ]
 
 
 class SubjectSerializer(serializers.ModelSerializer):
@@ -29,6 +65,35 @@ class SubjectSerializer(serializers.ModelSerializer):
     class Meta:
         model = Subject
         fields = ['id', 'name', 'slug', 'semester', 'syllabus']
+
+
+class NoteSerializer(serializers.ModelSerializer):
+    unit_slug = serializers.CharField(source='unit.slug', read_only=True)
+    unit_title = serializers.CharField(source='unit.title', read_only=True)
+    unit_order = serializers.IntegerField(source='unit.order', read_only=True)
+    unit_duration = serializers.CharField(source='unit.duration', read_only=True)
+    unit_content = serializers.CharField(source='unit.content', read_only=True)
+
+    class Meta:
+        model = Note
+        fields = [
+            'id',
+            'title',
+            'slug',
+            'body',
+            'pdf_file',
+            'unit',
+            'unit_slug',
+            'unit_title',
+            'unit_order',
+            'unit_duration',
+            'unit_content',
+            'credit_name',
+            'credit_url',
+            'credit_image',
+            'order',
+            'updated_at',
+        ]
 
 
 class SemesterSerializer(serializers.ModelSerializer):

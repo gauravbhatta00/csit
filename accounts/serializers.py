@@ -1,5 +1,6 @@
 from djoser.serializers import UserCreateSerializer
 from rest_framework import serializers
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.serializers import (
     TokenObtainPairSerializer,
     TokenRefreshSerializer,
@@ -11,9 +12,7 @@ from .models import (
     CustomUser,
     EmailSubscription,
     Notification,
-    PaymentTransaction,
-    SubscriptionPlan,
-    UserSubscription,
+    Testimonial,
 )
 
 
@@ -31,6 +30,14 @@ class CustomUserCreateSerializer(UserCreateSerializer):
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
     def validate(self, attrs):
+        username = attrs.get(self.username_field)
+        if username:
+            user = CustomUser.objects.filter(**{self.username_field: username}).first()
+            if user:
+                user.refresh_expired_suspension(save=True)
+                if not user.is_active:
+                    raise AuthenticationFailed(user.account_unavailable_message())
+
         data = super().validate(attrs)
         user = self.user
 
@@ -44,8 +51,6 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
         data['refresh'] = str(refresh)
         data['access'] = str(access)
-        data['is_premium'] = user.is_premium
-
         return data
 
 
@@ -53,6 +58,16 @@ class CustomTokenRefreshSerializer(TokenRefreshSerializer):
     def validate(self, attrs):
         refresh = RefreshToken(attrs['refresh'])
         user_id = refresh[api_settings.USER_ID_CLAIM]
+        try:
+            user = CustomUser.objects.get(id=user_id)
+        except CustomUser.DoesNotExist as exc:
+            raise AuthenticationFailed(
+                'Your account is not active. For more info, contact support.'
+            ) from exc
+        user.refresh_expired_suspension(save=True)
+        if not user.is_active:
+            raise AuthenticationFailed(user.account_unavailable_message())
+
         data = super().validate(attrs)
         access = AccessToken(data['access'])
 
@@ -60,39 +75,7 @@ class CustomTokenRefreshSerializer(TokenRefreshSerializer):
         return data
 
 
-class SubscriptionPlanSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = SubscriptionPlan
-        fields = [
-            'id',
-            'name',
-            'slug',
-            'price',
-            'billing_period',
-            'duration_days',
-            'description',
-            'features',
-            'is_active',
-        ]
-
-
-class UserSubscriptionSerializer(serializers.ModelSerializer):
-    plan = SubscriptionPlanSerializer(read_only=True)
-
-    class Meta:
-        model = UserSubscription
-        fields = [
-            'id',
-            'plan',
-            'starts_at',
-            'expires_at',
-            'is_active',
-        ]
-
-
 class ProfileSerializer(serializers.ModelSerializer):
-    current_plan = SubscriptionPlanSerializer(read_only=True)
-
     class Meta:
         model = CustomUser
         fields = [
@@ -105,17 +88,11 @@ class ProfileSerializer(serializers.ModelSerializer):
             'semester',
             'bio',
             'is_staff',
-            'is_premium',
-            'premium_expires_at',
-            'current_plan',
         ]
         read_only_fields = [
             'id',
             'username',
             'is_staff',
-            'is_premium',
-            'premium_expires_at',
-            'current_plan',
         ]
 
 
@@ -135,47 +112,6 @@ class NotificationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Notification
         fields = ['id', 'type', 'message', 'link_path', 'is_read', 'created_at']
-
-
-class KhaltiInitiateSerializer(serializers.Serializer):
-    plan_slug = serializers.SlugField()
-    customer_name = serializers.CharField(max_length=150)
-    customer_email = serializers.EmailField(required=False, allow_blank=True)
-    customer_phone = serializers.CharField(
-        max_length=30,
-        required=False,
-        allow_blank=True,
-    )
-
-
-class KhaltiVerifySerializer(serializers.Serializer):
-    pidx = serializers.CharField(max_length=100)
-
-
-class PaymentTransactionSerializer(serializers.ModelSerializer):
-    plan = SubscriptionPlanSerializer(read_only=True)
-
-    class Meta:
-        model = PaymentTransaction
-        fields = [
-            'id',
-            'plan',
-            'payment_method',
-            'amount',
-            'amount_paisa',
-            'status',
-            'pidx',
-            'payment_url',
-            'khalti_transaction_id',
-            'purchase_order_id',
-            'purchase_order_name',
-            'customer_name',
-            'customer_email',
-            'customer_phone',
-            'created_at',
-            'updated_at',
-            'completed_at',
-        ]
 
 
 class ContactMessageSerializer(serializers.ModelSerializer):
@@ -206,6 +142,59 @@ class EmailSubscriptionSerializer(serializers.ModelSerializer):
 
     def validate_email(self, value):
         return value.strip().lower()
+
+
+class TestimonialSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source='user.username', read_only=True)
+    reviewed_by_username = serializers.CharField(
+        source='reviewed_by.username',
+        read_only=True,
+    )
+
+    class Meta:
+        model = Testimonial
+        fields = [
+            'id',
+            'name',
+            'role',
+            'rating',
+            'review',
+            'status',
+            'username',
+            'reviewed_by_username',
+            'reviewed_at',
+            'created_at',
+        ]
+        read_only_fields = [
+            'id',
+            'status',
+            'username',
+            'reviewed_by_username',
+            'reviewed_at',
+            'created_at',
+        ]
+
+    def validate_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Name is required.")
+        return value
+
+    def validate_role(self, value):
+        return value.strip()
+
+    def validate_rating(self, value):
+        if value < 1 or value > 5:
+            raise serializers.ValidationError("Rating must be between 1 and 5.")
+        return value
+
+    def validate_review(self, value):
+        value = value.strip()
+        if len(value) < 12:
+            raise serializers.ValidationError(
+                "Review must be at least 12 characters.",
+            )
+        return value
 
 
 class PasswordResetRequestSerializer(serializers.Serializer):

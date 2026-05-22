@@ -5,84 +5,36 @@ from .models import (
     CustomUser,
     EmailSubscription,
     Notification,
-    PaymentTransaction,
-    SubscriptionPlan,
-    UserSubscription,
+    Testimonial,
 )
 
 
 @admin.register(CustomUser)
 class CustomUserAdmin(UserAdmin):
     model = CustomUser
-    list_display = ['username', 'email', 'is_premium', 'premium_expires_at', 'is_staff']
-    list_editable = ['is_premium', 'premium_expires_at']
+    list_display = [
+        'username',
+        'email',
+        'account_status',
+        'suspended_until',
+        'is_active',
+        'is_staff',
+    ]
+    list_filter = ['account_status', 'is_active', 'is_staff']
     search_fields = ['username', 'email']
     fieldsets = UserAdmin.fieldsets + (
         ('Profile Info', {
             'fields': ('phone', 'profile_picture', 'college', 'semester', 'bio')
         }),
-        ('Premium Info', {
-            'fields': ('is_premium', 'premium_expires_at', 'current_plan', 'active_token')
+        ('Account Access', {
+            'fields': ('account_status', 'suspended_until', 'active_token')
         }),
     )
 
-
-@admin.register(SubscriptionPlan)
-class SubscriptionPlanAdmin(admin.ModelAdmin):
-    list_display = [
-        'name',
-        'price',
-        'billing_period',
-        'duration_days',
-        'is_active',
-        'sort_order',
-    ]
-    list_editable = ['price', 'is_active', 'sort_order']
-    list_filter = ['billing_period', 'is_active']
-    prepopulated_fields = {'slug': ('name',)}
-    search_fields = ['name', 'description']
-    ordering = ['sort_order', 'price']
-
-
-@admin.register(UserSubscription)
-class UserSubscriptionAdmin(admin.ModelAdmin):
-    list_display = ['user', 'plan', 'starts_at', 'expires_at', 'is_active']
-    list_filter = ['is_active', 'plan']
-    search_fields = ['user__username', 'user__email', 'plan__name']
-    autocomplete_fields = ['user', 'plan']
-    date_hierarchy = 'starts_at'
-
-
-@admin.register(PaymentTransaction)
-class PaymentTransactionAdmin(admin.ModelAdmin):
-    list_display = [
-        'user',
-        'plan',
-        'payment_method',
-        'amount',
-        'status',
-        'pidx',
-        'khalti_transaction_id',
-        'created_at',
-        'completed_at',
-    ]
-    list_filter = ['status', 'payment_method', 'plan']
-    search_fields = [
-        'user__username',
-        'user__email',
-        'pidx',
-        'khalti_transaction_id',
-        'purchase_order_id',
-    ]
-    readonly_fields = [
-        'raw_initiate_response',
-        'raw_lookup_response',
-        'created_at',
-        'updated_at',
-        'completed_at',
-    ]
-    autocomplete_fields = ['user', 'plan', 'subscription']
-    date_hierarchy = 'created_at'
+    def save_model(self, request, obj, form, change):
+        if 'account_status' in form.changed_data:
+            obj.set_account_status(obj.account_status, obj.suspended_until)
+        super().save_model(request, obj, form, change)
 
 
 @admin.register(ContactMessage)
@@ -102,6 +54,17 @@ class EmailSubscriptionAdmin(admin.ModelAdmin):
     search_fields = ['email']
     list_editable = ['is_active']
     readonly_fields = ['created_at', 'updated_at']
+    date_hierarchy = 'created_at'
+
+
+@admin.register(Testimonial)
+class TestimonialAdmin(admin.ModelAdmin):
+    list_display = ['name', 'rating', 'status', 'user', 'reviewed_by', 'created_at']
+    list_filter = ['status', 'rating', 'created_at']
+    search_fields = ['name', 'role', 'review', 'user__username', 'user__email']
+    list_editable = ['status']
+    readonly_fields = ['created_at', 'updated_at', 'reviewed_at']
+    autocomplete_fields = ['user', 'reviewed_by']
     date_hierarchy = 'created_at'
 
 

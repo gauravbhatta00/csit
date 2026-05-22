@@ -33,11 +33,91 @@ class Subject(models.Model):
 
 class Syllabus(models.Model):
     subject = models.OneToOneField(Subject, on_delete=models.CASCADE, related_name='syllabus')
-    pdf_file = models.FileField(upload_to='syllabus/')
+    pdf_file = models.FileField(upload_to='syllabus/', blank=True)
+    course_title = models.CharField(max_length=200, blank=True)
+    course_no = models.CharField(max_length=40, blank=True)
+    semester_label = models.CharField(max_length=40, blank=True)
+    nature = models.CharField(max_length=120, blank=True)
+    full_marks = models.CharField(max_length=80, blank=True)
+    pass_marks = models.CharField(max_length=80, blank=True)
+    credit_hours = models.CharField(max_length=40, blank=True)
+    course_description = models.TextField(blank=True)
+    course_objective = models.TextField(blank=True)
+    laboratory_work = models.TextField(blank=True)
+    text_books = models.TextField(blank=True)
+    reference_books = models.TextField(blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return f"Syllabus - {self.subject.name}"
+
+
+class SyllabusUnit(models.Model):
+    syllabus = models.ForeignKey(Syllabus, on_delete=models.CASCADE, related_name='units')
+    title = models.CharField(max_length=180)
+    slug = models.SlugField(blank=True)
+    duration = models.CharField(max_length=40, blank=True)
+    content = models.TextField(blank=True)
+    order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ['order', 'id']
+        unique_together = ('syllabus', 'slug')
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.title)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.syllabus.subject.name} - {self.title}"
+
+
+class SyllabusSection(models.Model):
+    syllabus = models.ForeignKey(Syllabus, on_delete=models.CASCADE, related_name='sections')
+    title = models.CharField(max_length=160)
+    content = models.TextField(blank=True)
+    order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ['order', 'id']
+
+    def __str__(self):
+        return f"{self.syllabus.subject.name} - {self.title}"
+
+
+class Note(models.Model):
+    subject = models.ForeignKey(Subject, on_delete=models.CASCADE, related_name='notes')
+    unit = models.ForeignKey(
+        SyllabusUnit,
+        on_delete=models.SET_NULL,
+        related_name='notes',
+        blank=True,
+        null=True,
+    )
+    title = models.CharField(max_length=220)
+    slug = models.SlugField(blank=True)
+    body = models.TextField(blank=True)
+    pdf_file = models.FileField(upload_to='notes/', blank=True, null=True)
+    credit_name = models.CharField(max_length=120, blank=True)
+    credit_url = models.URLField(blank=True)
+    credit_image = models.ImageField(upload_to='notes/credits/', blank=True, null=True)
+    order = models.PositiveIntegerField(default=0)
+    is_published = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['unit__order', 'order', 'title']
+        unique_together = ('subject', 'slug')
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.title)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.subject.name} - {self.title}"
 
 
 class Year(models.Model):

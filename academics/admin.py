@@ -5,10 +5,13 @@ from .models import (
     MockTest,
     MockTestQuestion,
     MockTestResult,
+    Note,
     AnswerContribution,
     Semester,
     Subject,
     Syllabus,
+    SyllabusSection,
+    SyllabusUnit,
     Year,
     Question,
     QuestionPaper,
@@ -29,9 +32,73 @@ class SubjectAdmin(admin.ModelAdmin):
     prepopulated_fields = {'slug': ('name',)}  # ✅ Auto fill slug from name
 
 
+class SyllabusUnitInline(admin.TabularInline):
+    model = SyllabusUnit
+    extra = 0
+    fields = ['title', 'slug', 'duration', 'content', 'order']
+    prepopulated_fields = {'slug': ('title',)}
+
+
+class SyllabusSectionInline(admin.TabularInline):
+    model = SyllabusSection
+    extra = 0
+    fields = ['title', 'content', 'order']
+
+
 @admin.register(Syllabus)
 class SyllabusAdmin(admin.ModelAdmin):
     list_display = ['subject', 'updated_at']
+    inlines = [SyllabusUnitInline, SyllabusSectionInline]
+    fieldsets = (
+        (None, {
+            'fields': ('subject', 'pdf_file')
+        }),
+        ('Course header', {
+            'fields': (
+                'course_title',
+                'course_no',
+                'semester_label',
+                'nature',
+                'full_marks',
+                'pass_marks',
+                'credit_hours',
+            )
+        }),
+        ('Course details', {
+            'fields': (
+                'course_description',
+                'course_objective',
+                'laboratory_work',
+                'text_books',
+                'reference_books',
+            )
+        }),
+    )
+
+
+@admin.register(SyllabusUnit)
+class SyllabusUnitAdmin(admin.ModelAdmin):
+    list_display = ['title', 'syllabus', 'duration', 'order']
+    list_filter = ['syllabus__subject__semester', 'syllabus__subject']
+    prepopulated_fields = {'slug': ('title',)}
+    ordering = ['syllabus', 'order']
+
+
+@admin.register(SyllabusSection)
+class SyllabusSectionAdmin(admin.ModelAdmin):
+    list_display = ['title', 'syllabus', 'order']
+    list_filter = ['syllabus__subject__semester', 'syllabus__subject']
+    search_fields = ['title', 'content', 'syllabus__subject__name']
+    ordering = ['syllabus', 'order']
+
+
+@admin.register(Note)
+class NoteAdmin(admin.ModelAdmin):
+    list_display = ['title', 'subject', 'unit', 'pdf_file', 'credit_name', 'is_published', 'order', 'updated_at']
+    list_filter = ['is_published', 'subject__semester', 'subject']
+    prepopulated_fields = {'slug': ('title',)}
+    search_fields = ['title', 'body', 'subject__name']
+    ordering = ['subject', 'unit__order', 'order', 'title']
 
 
 class QuestionSectionInline(admin.TabularInline):

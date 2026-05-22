@@ -13,6 +13,7 @@ from .models import (
     MockTest,
     MockTestAnswer,
     MockTestResult,
+    Note,
     Semester,
     Subject,
     Syllabus,
@@ -31,9 +32,10 @@ from .serializers import (
     PlatformDiscussionSerializer,
     SemesterSerializer, SubjectSerializer,
     SyllabusSerializer, YearSerializer,
-    QuestionSerializer, QuestionPaperSerializer
+    QuestionSerializer, QuestionPaperSerializer,
+    NoteSerializer,
 )
-from accounts.permissions import IsPremiumUser, IsSingleDeviceAuthenticated
+from accounts.permissions import IsSingleDeviceAuthenticated
 from .utils import notify_reply
 
 
@@ -50,7 +52,7 @@ def get_subject_by_slug_or_id(value):
 
 class SemesterListView(ListAPIView):
     permission_classes = [AllowAny]
-    queryset = Semester.objects.prefetch_related('subjects__syllabus')
+    queryset = Semester.objects.prefetch_related('subjects__syllabus__units', 'subjects__syllabus__sections')
     serializer_class = SemesterSerializer
 
 
@@ -64,7 +66,10 @@ class SemesterSubjectListView(ListAPIView):
         query = Q(semester__slug=semester_value)
         if str(semester_value).isdigit():
             query |= Q(semester_id=int(semester_value))
-        return Subject.objects.filter(query).select_related('syllabus')
+        return Subject.objects.filter(query).select_related('syllabus').prefetch_related(
+            'syllabus__units',
+            'syllabus__sections',
+        )
 
 
 class SubjectSyllabusView(RetrieveAPIView):
@@ -74,7 +79,10 @@ class SubjectSyllabusView(RetrieveAPIView):
     def get_object(self):
         # ✅ Filter by subject slug
         subject = get_subject_by_slug_or_id(self.kwargs['subject_slug'])
-        return get_object_or_404(Syllabus, subject=subject)
+        return get_object_or_404(
+            Syllabus.objects.prefetch_related('units', 'sections'),
+            subject=subject,
+        )
 
 
 class SubjectDetailView(RetrieveAPIView):
@@ -82,7 +90,13 @@ class SubjectDetailView(RetrieveAPIView):
     serializer_class = SubjectSerializer
 
     def get_object(self):
-        return get_subject_by_slug_or_id(self.kwargs['subject_slug'])
+        return get_object_or_404(
+            Subject.objects.select_related('semester', 'syllabus').prefetch_related(
+                'syllabus__units',
+                'syllabus__sections',
+            ),
+            build_slug_or_id_query(self.kwargs['subject_slug']),
+        )
 
 
 class SubjectYearListView(ListAPIView):
@@ -92,6 +106,36 @@ class SubjectYearListView(ListAPIView):
     def get_queryset(self):
         subject = get_subject_by_slug_or_id(self.kwargs['subject_slug'])
         return Year.objects.filter(subject=subject)
+
+
+class SubjectNoteListView(ListAPIView):
+    permission_classes = [AllowAny]
+    serializer_class = NoteSerializer
+
+    def get_queryset(self):
+        subject = get_subject_by_slug_or_id(self.kwargs['subject_slug'])
+        queryset = Note.objects.filter(
+            subject=subject,
+            is_published=True,
+        ).select_related('unit')
+        unit_slug = (self.request.query_params.get('unit') or '').strip()
+        if unit_slug:
+            queryset = queryset.filter(unit__slug=unit_slug)
+        return queryset
+
+
+class SubjectNoteDetailView(RetrieveAPIView):
+    permission_classes = [AllowAny]
+    serializer_class = NoteSerializer
+
+    def get_object(self):
+        subject = get_subject_by_slug_or_id(self.kwargs['subject_slug'])
+        return get_object_or_404(
+            Note.objects.select_related('unit'),
+            subject=subject,
+            slug=self.kwargs['note_slug'],
+            is_published=True,
+        )
 
 
 class YearQuestionListView(ListAPIView):
@@ -118,7 +162,7 @@ class YearQuestionListView(ListAPIView):
 
 
 class YearQuestionPaperView(RetrieveAPIView):
-    permission_classes = [IsAuthenticated, IsPremiumUser, IsSingleDeviceAuthenticated]
+    permission_classes = [IsAuthenticated, IsSingleDeviceAuthenticated]
     serializer_class = QuestionPaperSerializer
 
     def get_object(self):
