@@ -67,7 +67,7 @@ urlpatterns = [
     path('jwt/create/', CustomTokenObtainPairView.as_view()),
     path('jwt/refresh/', CustomTokenRefreshView.as_view()),
     path('jwt/verify/', TokenVerifyView.as_view()),
-    path('google/', GoogleLoginView.as_view()),
+    path('google/', GoogleLoginView.as_view(), name='google-login'),
     path('password-reset/', PasswordResetRequestView.as_view()),
     path('password-reset/confirm/', PasswordResetConfirmView.as_view()),
     path('logout/', LogoutView.as_view()),

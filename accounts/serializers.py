@@ -14,6 +14,11 @@ from .models import (
     Notification,
     Testimonial,
 )
+from .services import (
+    GoogleAuthConfigurationError,
+    GoogleAuthError,
+    verify_google_id_token,
+)
 
 
 class CustomUserCreateSerializer(UserCreateSerializer):
@@ -211,4 +216,25 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
 
 
 class GoogleLoginSerializer(serializers.Serializer):
-    credential = serializers.CharField()
+    credential = serializers.CharField(
+        trim_whitespace=True,
+        write_only=True,
+        error_messages={
+            'blank': 'Google credential is required.',
+            'required': 'Google credential is required.',
+        },
+    )
+
+    def validate_credential(self, value):
+        if not value:
+            raise serializers.ValidationError('Google credential is required.')
+        return value
+
+    def validate(self, attrs):
+        try:
+            attrs['google_user'] = verify_google_id_token(attrs['credential'])
+        except GoogleAuthConfigurationError:
+            raise
+        except GoogleAuthError as exc:
+            raise serializers.ValidationError({'credential': str(exc)}) from exc
+        return attrs

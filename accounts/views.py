@@ -1,5 +1,6 @@
 import csv
 import io
+import logging
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -59,11 +60,12 @@ from .serializers import (
 )
 from .services import (
     GoogleAuthConfigurationError,
-    GoogleAuthError,
     build_login_response,
     build_unique_username,
-    verify_google_id_token,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 SYLLABUS_FIELD_SECTIONS = {
@@ -374,31 +376,61 @@ class GoogleLoginView(APIView):
 
     def post(self, request):
         serializer = GoogleLoginSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
         try:
-            google_user = verify_google_id_token(
-                serializer.validated_data['credential']
-            )
+            serializer.is_valid(raise_exception=True)
         except GoogleAuthConfigurationError as exc:
+            logger.error('Google login is not configured: %s', exc)
             return Response({'detail': str(exc)}, status=500)
-        except GoogleAuthError as exc:
-            return Response({'detail': str(exc)}, status=400)
 
+        google_user = serializer.validated_data['google_user']
         email = google_user['email'].strip().lower()
         User = get_user_model()
-        user = User.objects.filter(email__iexact=email).first()
+        is_new_user = False
 
-        if not user:
-            user = User.objects.create_user(
-                username=build_unique_username(email),
-                email=email,
-                password=None,
+        try:
+            with transaction.atomic():
+                user = User.objects.filter(email__iexact=email).first()
+                if not user:
+                    user = self.create_google_user(User, email, google_user)
+                    is_new_user = True
+        except IntegrityError:
+            user = User.objects.filter(email__iexact=email).first()
+            if not user:
+                logger.exception('Google login user creation failed after integrity error.')
+                return Response(
+                    {'detail': 'User creation/login failure.'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+            is_new_user = False
+        except Exception:
+            logger.exception('Google login user creation/login failed.')
+            return Response(
+                {'detail': 'User creation/login failure.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-            user.set_unusable_password()
-            user.save(update_fields=['password'])
 
-        return Response(build_login_response(user))
+        logger.info(
+            'Google login succeeded for user_id=%s is_new_user=%s',
+            user.id,
+            is_new_user,
+        )
+        return Response(build_login_response(user, google_user, is_new_user))
+
+    def create_google_user(self, User, email, google_user):
+        user_fields = {field.name for field in User._meta.get_fields()}
+        create_kwargs = {'email': email}
+
+        if 'username' in user_fields:
+            create_kwargs['username'] = build_unique_username(email)
+        if 'first_name' in user_fields:
+            create_kwargs['first_name'] = google_user.get('given_name', '')[:150]
+        if 'last_name' in user_fields:
+            create_kwargs['last_name'] = google_user.get('family_name', '')[:150]
+
+        user = User.objects.create_user(password=None, **create_kwargs)
+        user.set_unusable_password()
+        user.save(update_fields=['password'])
+        return user
 
 
 class ContactMessageCreateView(APIView):
@@ -1368,15 +1400,21 @@ class AdminQuestionListView(APIView):
             'year',
             'year__subject',
             'year__subject__semester',
+            'section',
         ).order_by('year__subject__semester__id', 'year__subject__name', '-year__year', 'order', 'id')
 
     def serialize_question(self, question):
         return {
             'id': question.id,
+            'source_question_id': question.source_question_id,
+            'source_url': question.source_url,
+            'answer_source_url': question.answer_source_url,
+            'answer_image_paths': question.answer_image_paths,
             'question_text': question.question_text,
             'answer_text': question.answer_text,
             'marks': question.marks,
             'order': question.order,
+            'section': question.section.title if question.section else '',
             'year': question.year.year,
             'year_id': question.year_id,
             'subject_id': question.year.subject_id,
@@ -1465,7 +1503,15 @@ class AdminQuestionDetailView(APIView):
                 year=year_name,
             )
 
-        for field in ['question_text', 'answer_text', 'marks']:
+        for field in [
+            'source_question_id',
+            'source_url',
+            'answer_source_url',
+            'answer_image_paths',
+            'question_text',
+            'answer_text',
+            'marks',
+        ]:
             if field in request.data:
                 value = (request.data.get(field) or '').strip()
                 if field in ['question_text', 'answer_text'] and not value:
@@ -1588,17 +1634,28 @@ class AdminQuestionBulkImportView(APIView):
 
             answer_markdown = self.get_value(row, 'answer_markdown', 'answer_text', 'answer')
             image_paths = self.get_value(row, 'image_paths')
+            answer_source_url = self.get_value(row, 'answer_source_url', 'source_url')
 
-            if image_paths:
-                answer_markdown = (
-                    f"{answer_markdown}\n\nImages: {image_paths}"
-                    if answer_markdown
-                    else f"Images: {image_paths}"
-                )
-
-            answers[question_id] = answer_markdown
+            answers[question_id] = {
+                'answer_text': answer_markdown,
+                'answer_image_paths': image_paths,
+                'answer_source_url': answer_source_url,
+            }
 
         return answers
+
+    def get_existing_question(self, year, source_question_id, question_text):
+        if source_question_id:
+            question = Question.objects.filter(
+                source_question_id=source_question_id,
+            ).first()
+            if question:
+                return question
+
+        return Question.objects.filter(
+            year=year,
+            question_text=question_text,
+        ).first()
 
     def post(self, request):
         upload = request.FILES.get('file')
@@ -1631,17 +1688,27 @@ class AdminQuestionBulkImportView(APIView):
         for index, row in enumerate(reader, start=2):
             question_id = self.get_value(row, 'question_id')
             question_text = self.get_value(row, 'question_text', 'question')
+            answer_data = answers_by_question_id.get(question_id, {})
             answer_text = (
                 self.get_value(row, 'answer_text', 'answer', 'answer_markdown')
-                or answers_by_question_id.get(question_id, '')
+                or answer_data.get('answer_text', '')
             )
             year_value = self.get_value(row, 'year') or default_year
             marks = self.get_value(row, 'marks')
             order_value = self.get_value(row, 'order')
             question_number = self.get_value(row, 'question_number')
-            section_title = self.get_value(row, 'section')
+            section_title = self.get_value(row, 'section', 'group')
             exam_time = self.get_value(row, 'exam_time')
             instructions = self.get_value(row, 'instructions')
+            source_url = self.get_value(row, 'source_url', 'question_source_url')
+            answer_source_url = (
+                self.get_value(row, 'answer_source_url')
+                or answer_data.get('answer_source_url', '')
+            )
+            answer_image_paths = (
+                self.get_value(row, 'image_paths', 'answer_image_paths')
+                or answer_data.get('answer_image_paths', '')
+            )
 
             if not question_text:
                 errors.append({'row': index, 'error': 'Question text is required.'})
@@ -1688,14 +1755,25 @@ class AdminQuestionBulkImportView(APIView):
                     defaults={'order': 0},
                 )
 
-            question = Question.objects.create(
-                year=year,
-                section=section,
-                question_text=question_text,
-                answer_text=answer_text,
-                marks=marks,
-                order=order,
-            )
+            question = self.get_existing_question(year, question_id, question_text)
+            question_values = {
+                'year': year,
+                'section': section,
+                'source_question_id': question_id,
+                'source_url': source_url,
+                'answer_source_url': answer_source_url,
+                'answer_image_paths': answer_image_paths,
+                'question_text': question_text,
+                'answer_text': answer_text,
+                'marks': marks,
+                'order': order,
+            }
+            if question:
+                for field, value in question_values.items():
+                    setattr(question, field, value)
+                question.save()
+            else:
+                question = Question.objects.create(**question_values)
             imported.append(AdminQuestionListView().serialize_question(question))
 
         if not imported and errors:

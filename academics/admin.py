@@ -141,10 +141,22 @@ class QuestionSectionAdmin(admin.ModelAdmin):
 
 @admin.register(Question)
 class QuestionAdmin(admin.ModelAdmin):
-    list_display = ['get_subject', 'get_year', 'section', 'order', 'marks', 'question_text']
+    list_display = ['get_subject', 'get_year', 'section', 'source_question_id', 'order', 'marks', 'question_text']
     list_filter = ['year__subject__semester', 'year__subject', 'year', 'section']
+    search_fields = ['question_text', 'answer_text', 'source_question_id']
     ordering = ['year', 'section__order', 'order']
-    fields = ['year', 'section', 'order', 'marks', 'question_text', 'answer_text']
+    fields = [
+        'year',
+        'section',
+        'source_question_id',
+        'source_url',
+        'answer_source_url',
+        'answer_image_paths',
+        'order',
+        'marks',
+        'question_text',
+        'answer_text',
+    ]
 
     def get_subject(self, obj):
         return obj.year.subject.name

@@ -165,6 +165,10 @@ class Question(models.Model):
         blank=True,
         null=True
     )
+    source_question_id = models.CharField(max_length=40, blank=True, db_index=True)
+    source_url = models.URLField(blank=True)
+    answer_source_url = models.URLField(blank=True)
+    answer_image_paths = models.TextField(blank=True)
     question_text = models.TextField()
     answer_text = models.TextField()
     marks = models.CharField(max_length=20, blank=True)
@@ -172,6 +176,13 @@ class Question(models.Model):
 
     class Meta:
         ordering = ['section__order', 'order', 'id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['source_question_id'],
+                condition=~models.Q(source_question_id=''),
+                name='unique_question_source_question_id',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.year.subject.name} ({self.year.year}) - {self.question_text[:50]}"
