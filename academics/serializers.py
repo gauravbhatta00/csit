@@ -136,6 +136,10 @@ class QuestionSerializer(serializers.ModelSerializer):
         fields = [
             'id',
             'section',
+            'source_question_id',
+            'source_url',
+            'answer_source_url',
+            'answer_image_paths',
             'question_text',
             'answer_text',
             'marks',

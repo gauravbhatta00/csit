@@ -1,5 +1,5 @@
 import tempfile
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
@@ -537,6 +537,54 @@ class AuthApiTests(APITestCase):
         self.assertEqual(response.data['questions'][0]['subject'], 'Computer Architecture')
         self.assertIn('Cache memory', response.data['questions'][0]['answer_text'])
 
+    def test_staff_user_can_bulk_import_answer_export_csv_idempotently(self):
+        staff = User.objects.create_user(
+            username='answer-export-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        self.client.force_authenticate(user=staff)
+
+        csv_content = (
+            'question_id,semester,subject,year,group,question,answer\n'
+            '34605,Semester 1,Introduction to Information Technology,2081,Section A,'
+            '"Compare primary memory with secondary memory.",'
+            '"**Comparison:**\n\n| Primary | Secondary |\n| --- | --- |"\n'
+        ).encode('utf-8')
+
+        first_file = SimpleUploadedFile(
+            'year_2081_answers.csv',
+            csv_content,
+            content_type='text/csv',
+        )
+        first_response = self.client.post(
+            '/api/accounts/admin/questions/bulk-import/',
+            {'file': first_file},
+            format='multipart',
+        )
+        second_file = SimpleUploadedFile(
+            'year_2081_answers.csv',
+            csv_content,
+            content_type='text/csv',
+        )
+        second_response = self.client.post(
+            '/api/accounts/admin/questions/bulk-import/',
+            {'file': second_file},
+            format='multipart',
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_response.data['imported_count'], 1)
+        self.assertEqual(second_response.data['imported_count'], 1)
+        self.assertEqual(Question.objects.filter(source_question_id='34605').count(), 1)
+
+        question = Question.objects.get(source_question_id='34605')
+        self.assertEqual(question.section.title, 'Section A')
+        self.assertIn('| Primary | Secondary |', question.answer_text)
+        self.assertEqual(question.year.year, '2081')
+        self.assertEqual(question.year.subject.semester.name, 'Semester 1')
+
     def test_staff_user_can_approve_answer_contribution(self):
         staff = User.objects.create_user(
             username='review-admin',
@@ -689,41 +737,36 @@ class AuthApiTests(APITestCase):
         self.assertIsNone(self.user.active_token)
 
     @override_settings(GOOGLE_CLIENT_ID='google-client-id')
-    @patch('accounts.services.requests.get')
-    def test_google_login_creates_user_and_returns_tokens(self, mocked_get):
-        mocked_response = Mock()
-        mocked_response.status_code = 200
-        mocked_response.json.return_value = {
-            'aud': 'google-client-id',
+    @patch('accounts.services.id_token.verify_oauth2_token')
+    def test_google_login_creates_user_and_returns_tokens(self, mocked_verify):
+        mocked_verify.return_value = {
             'email': 'GoogleUser@example.com',
-            'email_verified': 'true',
+            'email_verified': True,
+            'name': 'Google User',
+            'picture': 'https://example.com/avatar.jpg',
         }
-        mocked_get.return_value = mocked_response
 
         response = self.client.post(
-            '/api/accounts/google/',
+            '/api/auth/google/',
             {'credential': 'valid-google-token'},
             format='json',
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn('access', response.data)
+        self.assertIn('refresh', response.data)
+        self.assertEqual(response.data['user']['email'], 'googleuser@example.com')
+        self.assertEqual(response.data['user']['name'], 'Google User')
+        self.assertTrue(response.data['user']['is_new_user'])
         self.assertTrue(User.objects.filter(email='googleuser@example.com').exists())
 
     @override_settings(GOOGLE_CLIENT_ID='google-client-id')
-    @patch('accounts.services.requests.get')
-    def test_google_login_rejects_invalid_audience(self, mocked_get):
-        mocked_response = Mock()
-        mocked_response.status_code = 200
-        mocked_response.json.return_value = {
-            'aud': 'other-client-id',
-            'email': 'student@example.com',
-            'email_verified': 'true',
-        }
-        mocked_get.return_value = mocked_response
+    @patch('accounts.services.id_token.verify_oauth2_token')
+    def test_google_login_rejects_invalid_token(self, mocked_verify):
+        mocked_verify.side_effect = ValueError('Token has wrong audience.')
 
         response = self.client.post(
-            '/api/accounts/google/',
+            '/api/auth/google/',
             {'credential': 'invalid-google-token'},
             format='json',
         )

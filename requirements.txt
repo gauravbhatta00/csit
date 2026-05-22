@@ -8,6 +8,7 @@ Django==6.0.2
 djangorestframework==3.16.1
 djangorestframework_simplejwt==5.5.1
 djoser==2.3.3
+google-auth>=2.29.0,<3.0.0
 idna==3.11
 oauthlib==3.3.1
 pycparser==3.0
