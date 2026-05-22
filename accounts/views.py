@@ -126,6 +126,18 @@ def parse_csv_bool(value, default=True):
     return normalized in {'1', 'true', 'yes', 'y', 'published'}
 
 
+def get_csv_row_value(row, *keys):
+    normalized_row = {
+        compact_match_value(key): value
+        for key, value in row.items()
+    }
+    for key in keys:
+        value = normalized_row.get(compact_match_value(key))
+        if clean_csv_value(value):
+            return clean_csv_value(value)
+    return ''
+
+
 def read_uploaded_csv(uploaded_file):
     try:
         text = uploaded_file.read().decode('utf-8-sig')
@@ -1184,6 +1196,7 @@ class AdminSubjectNoteListView(APIView):
             'unit_duration': note.unit.duration if note.unit else '',
             'unit_content': note.unit.content if note.unit else '',
             'credit_name': note.credit_name,
+            'credit_designation': note.credit_designation,
             'credit_url': note.credit_url,
             'credit_image': note.credit_image.url if note.credit_image else None,
             'order': note.order,
@@ -1201,6 +1214,7 @@ class AdminSubjectNoteListView(APIView):
         pdf_file = request.FILES.get('pdf_file')
         unit_id = request.data.get('unit') or None
         credit_name = (request.data.get('credit_name') or '').strip()
+        credit_designation = (request.data.get('credit_designation') or '').strip()
         credit_url = (request.data.get('credit_url') or '').strip()
         credit_image = request.FILES.get('credit_image')
 
@@ -1225,6 +1239,7 @@ class AdminSubjectNoteListView(APIView):
                 'body': '',
                 'pdf_file': pdf_file,
                 'credit_name': credit_name,
+                'credit_designation': credit_designation,
                 'credit_url': credit_url,
                 'credit_image': credit_image,
                 'order': unit.order,
@@ -1307,6 +1322,9 @@ class AdminSubjectNoteCsvImportView(APIView):
             slug = slugify(clean_csv_value(row.get('slug')) or title)
             order = parse_csv_order(row.get('order') or row.get('unit_no'))
             is_published = parse_csv_bool(row.get('is_published'), default=True)
+            credit_name = clean_csv_value(row.get('credit_name') or row.get('credit person') or row.get('credit_person'))
+            credit_designation = clean_csv_value(row.get('credit_designation') or row.get('designation'))
+            credit_url = clean_csv_value(row.get('credit_url') or row.get('credit link') or row.get('credit_link'))
 
             Note.objects.update_or_create(
                 subject=subject,
@@ -1315,6 +1333,9 @@ class AdminSubjectNoteCsvImportView(APIView):
                     'unit': unit,
                     'title': title,
                     'body': body,
+                    'credit_name': credit_name,
+                    'credit_designation': credit_designation,
+                    'credit_url': credit_url,
                     'order': order,
                     'is_published': is_published,
                 },
@@ -1345,6 +1366,7 @@ class AdminNoteDetailView(APIView):
             'unit_duration': note.unit.duration if note.unit else '',
             'unit_content': note.unit.content if note.unit else '',
             'credit_name': note.credit_name,
+            'credit_designation': note.credit_designation,
             'credit_url': note.credit_url,
             'credit_image': note.credit_image.url if note.credit_image else None,
             'order': note.order,
@@ -1365,6 +1387,8 @@ class AdminNoteDetailView(APIView):
             note.credit_image = credit_image
         if 'credit_name' in request.data:
             note.credit_name = (request.data.get('credit_name') or '').strip()
+        if 'credit_designation' in request.data:
+            note.credit_designation = (request.data.get('credit_designation') or '').strip()
         if 'credit_url' in request.data:
             note.credit_url = (request.data.get('credit_url') or '').strip()
         if 'unit' in request.data:
@@ -2176,6 +2200,77 @@ class AdminMockTestListView(APIView):
             is_active=bool(request.data.get('is_active', True)),
         )
         return Response(self.serialize_mock_test(mock_test), status=201)
+
+
+class AdminMockTestCsvImportView(APIView):
+    permission_classes = [IsAdminUser]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        subject = get_object_or_404(Subject, pk=request.data.get('subject_id'))
+        csv_file = request.FILES.get('file')
+        if not csv_file:
+            return Response({'detail': 'CSV file is required.'}, status=400)
+        if not csv_file.name.lower().endswith('.csv'):
+            return Response({'detail': 'Only CSV files are allowed.'}, status=400)
+
+        rows = read_uploaded_csv(csv_file)
+        questions = []
+        errors = []
+
+        for index, row in enumerate(rows, start=2):
+            question_text = get_csv_row_value(row, 'question_text', 'question', 'prompt')
+            option_a = get_csv_row_value(row, 'option_a', 'option a', 'a')
+            option_b = get_csv_row_value(row, 'option_b', 'option b', 'b')
+            option_c = get_csv_row_value(row, 'option_c', 'option c', 'c')
+            option_d = get_csv_row_value(row, 'option_d', 'option d', 'd')
+            correct_option = get_csv_row_value(
+                row,
+                'correct_option',
+                'correct answer',
+                'correct',
+                'answer',
+            )[:1].upper()
+
+            if not all([question_text, option_a, option_b, option_c, option_d]):
+                errors.append(f'Row {index}: question and all four options are required.')
+                continue
+            if correct_option not in {'A', 'B', 'C', 'D'}:
+                errors.append(f'Row {index}: correct answer must be A, B, C, or D.')
+                continue
+
+            questions.append(MockTestQuestion(
+                question_text=question_text,
+                option_a=option_a,
+                option_b=option_b,
+                option_c=option_c,
+                option_d=option_d,
+                correct_option=correct_option,
+                marks=1,
+            ))
+
+        if not questions:
+            return Response({
+                'detail': 'No valid mock questions found in CSV.',
+                'errors': errors,
+            }, status=400)
+
+        with transaction.atomic():
+            mock_test = MockTest.objects.create(
+                subject=subject,
+                title=f'{subject.name} Mock Test',
+                duration_minutes=max(1, int(len(questions) * 1.5 + 0.9999)),
+                total_marks=len(questions),
+                is_active=True,
+            )
+            for question in questions:
+                question.mock_test = mock_test
+            MockTestQuestion.objects.bulk_create(questions)
+
+        data = AdminMockTestListView().serialize_mock_test(mock_test)
+        data['imported_count'] = len(questions)
+        data['errors'] = errors
+        return Response(data, status=201)
 
 
 class AdminMockTestDetailView(APIView):

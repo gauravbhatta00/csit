@@ -100,6 +100,7 @@ class Note(models.Model):
     body = models.TextField(blank=True)
     pdf_file = models.FileField(upload_to='notes/', blank=True, null=True)
     credit_name = models.CharField(max_length=120, blank=True)
+    credit_designation = models.CharField(max_length=160, blank=True)
     credit_url = models.URLField(blank=True)
     credit_image = models.ImageField(upload_to='notes/credits/', blank=True, null=True)
     order = models.PositiveIntegerField(default=0)

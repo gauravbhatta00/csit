@@ -94,10 +94,10 @@ class SyllabusSectionAdmin(admin.ModelAdmin):
 
 @admin.register(Note)
 class NoteAdmin(admin.ModelAdmin):
-    list_display = ['title', 'subject', 'unit', 'pdf_file', 'credit_name', 'is_published', 'order', 'updated_at']
+    list_display = ['title', 'subject', 'unit', 'pdf_file', 'credit_name', 'credit_designation', 'is_published', 'order', 'updated_at']
     list_filter = ['is_published', 'subject__semester', 'subject']
     prepopulated_fields = {'slug': ('title',)}
-    search_fields = ['title', 'body', 'subject__name']
+    search_fields = ['title', 'body', 'subject__name', 'credit_name', 'credit_designation']
     ordering = ['subject', 'unit__order', 'order', 'title']
 
 

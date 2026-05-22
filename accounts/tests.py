@@ -13,7 +13,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import AccessToken
 
-from academics.models import AnswerContribution, Note, Question, Semester, Subject, Syllabus, SyllabusSection, SyllabusUnit, Year
+from academics.models import AnswerContribution, MockTest, Note, Question, Semester, Subject, Syllabus, SyllabusSection, SyllabusUnit, Year
 from .models import ContactMessage, EmailSubscription, Testimonial
 
 User = get_user_model()
@@ -402,8 +402,8 @@ class AuthApiTests(APITestCase):
         csv_file = SimpleUploadedFile(
             'notes.csv',
             (
-                'course_code,course_title,unit_no,title,body,order,is_published\n'
-                'CSC115,C Programming,1,Algorithm notes,Steps for problem solving.,1,true\n'
+                'course_code,course_title,unit_no,title,body,credit_name,credit_designation,order,is_published\n'
+                'CSC115,C Programming,1,Algorithm notes,Steps for problem solving.,Jane Doe,CSIT Lecturer,1,true\n'
             ).encode('utf-8'),
             content_type='text/csv',
         )
@@ -419,6 +419,8 @@ class AuthApiTests(APITestCase):
         note = Note.objects.get(subject=subject)
         self.assertEqual(note.unit, unit)
         self.assertEqual(note.title, 'Algorithm notes')
+        self.assertEqual(note.credit_name, 'Jane Doe')
+        self.assertEqual(note.credit_designation, 'CSIT Lecturer')
 
     def test_staff_user_can_bulk_import_questions_from_csv(self):
         staff = User.objects.create_user(
@@ -498,6 +500,47 @@ class AuthApiTests(APITestCase):
             Subject.objects.filter(semester=semester).count(),
             2,
         )
+
+    def test_staff_user_can_import_mock_test_from_oop_style_csv(self):
+        staff = User.objects.create_user(
+            username='mock-csv-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        self.client.force_authenticate(user=staff)
+        semester = Semester.objects.create(name='Semester II')
+        subject = Subject.objects.create(
+            semester=semester,
+            name='Object Oriented Programming',
+            slug='object-oriented-programming',
+        )
+        csv_file = SimpleUploadedFile(
+            'oop.csv',
+            (
+                '"Semester","Subject","Unit","Question","Option A","Option B","Option C","Option D","Correct Answer","Difficulty"\n'
+                '"II","Object Oriented Programming","Unit 1","What is encapsulation?","Inheritance","Data hiding","Macro","Loop","B","Hard"\n'
+                '"II","Object Oriented Programming","Unit 1","Which concept supports reuse?","Inheritance","Compilation","Token","Array","A","Hard"\n'
+            ).encode('utf-8'),
+            content_type='text/csv',
+        )
+
+        response = self.client.post(
+            '/api/accounts/admin/mock-tests/import-csv/',
+            {
+                'file': csv_file,
+                'subject_id': subject.id,
+            },
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['imported_count'], 2)
+        self.assertEqual(response.data['errors'], [])
+        mock_test = MockTest.objects.get(subject=subject)
+        self.assertEqual(mock_test.title, 'Object Oriented Programming Mock Test')
+        self.assertEqual(mock_test.duration_minutes, 3)
+        self.assertEqual(mock_test.total_marks, 2)
+        self.assertEqual(mock_test.questions.count(), 2)
 
     def test_staff_user_can_bulk_import_main_py_question_and_answer_csvs(self):
         staff = User.objects.create_user(

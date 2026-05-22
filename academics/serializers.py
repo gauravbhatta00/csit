@@ -89,6 +89,7 @@ class NoteSerializer(serializers.ModelSerializer):
             'unit_duration',
             'unit_content',
             'credit_name',
+            'credit_designation',
             'credit_url',
             'credit_image',
             'order',
