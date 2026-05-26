@@ -221,6 +221,7 @@ class AnswerContribution(models.Model):
         choices=STATUS_CHOICES,
         default=STATUS_PENDING,
     )
+    rejection_reason = models.TextField(blank=True)
     reviewed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,

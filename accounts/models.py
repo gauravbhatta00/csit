@@ -191,11 +191,15 @@ class Notification(models.Model):
     TYPE_REPLY = 'reply'
     TYPE_PAPER = 'paper'
     TYPE_MOCK_TEST = 'mock_test'
+    TYPE_CONTRIBUTION = 'contribution'
+    TYPE_CUSTOM = 'custom'
 
     TYPE_CHOICES = [
         (TYPE_REPLY, 'Discussion Reply'),
         (TYPE_PAPER, 'New Question Paper'),
         (TYPE_MOCK_TEST, 'New Mock Test'),
+        (TYPE_CONTRIBUTION, 'Answer Contribution'),
+        (TYPE_CUSTOM, 'Custom'),
     ]
 
     user = models.ForeignKey(

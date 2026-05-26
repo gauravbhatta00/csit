@@ -14,7 +14,7 @@ from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import AccessToken
 
 from academics.models import AnswerContribution, MockTest, Note, Question, Semester, Subject, Syllabus, SyllabusSection, SyllabusUnit, Year
-from .models import ContactMessage, EmailSubscription, Testimonial
+from .models import ContactMessage, EmailSubscription, Notification, Testimonial
 
 User = get_user_model()
 
@@ -268,6 +268,72 @@ class AuthApiTests(APITestCase):
         self.assertEqual(suspend_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(delete_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertTrue(User.objects.filter(id=staff.id).exists())
+
+    def test_staff_user_can_send_custom_notification_to_specific_user(self):
+        staff = User.objects.create_user(
+            username='notification-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        target = User.objects.create_user(
+            username='notification-target',
+            password='pass12345',
+        )
+        self.client.force_authenticate(user=staff)
+
+        response = self.client.post(
+            '/api/accounts/admin/notifications/',
+            {
+                'recipient': 'user',
+                'user_id': target.id,
+                'message': 'Mock test starts tomorrow.',
+                'link_path': '/mock-tests',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['sent_count'], 1)
+        notification = Notification.objects.get(user=target)
+        self.assertEqual(notification.type, Notification.TYPE_CUSTOM)
+        self.assertEqual(notification.message, 'Mock test starts tomorrow.')
+        self.assertEqual(notification.link_path, '/mock-tests')
+        self.assertEqual(response.data['notifications'][0]['username'], target.username)
+
+    def test_staff_user_can_send_custom_notification_to_all_active_users(self):
+        staff = User.objects.create_user(
+            username='broadcast-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        active_user = User.objects.create_user(
+            username='active-recipient',
+            password='pass12345',
+        )
+        inactive_user = User.objects.create_user(
+            username='inactive-recipient',
+            password='pass12345',
+            is_active=False,
+        )
+        self.client.force_authenticate(user=staff)
+
+        response = self.client.post(
+            '/api/accounts/admin/notifications/',
+            {
+                'recipient': 'all',
+                'message': 'New syllabus notes are available.',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['sent_count'], 3)
+        self.assertEqual(
+            set(Notification.objects.values_list('user__username', flat=True)),
+            {'student', 'broadcast-admin', 'active-recipient'},
+        )
+        self.assertFalse(Notification.objects.filter(user=inactive_user).exists())
+        self.assertTrue(Notification.objects.filter(user=active_user).exists())
 
     def test_admin_semester_and_subject_lists_require_staff_user(self):
         self.client.force_authenticate(user=self.user)
@@ -628,6 +694,91 @@ class AuthApiTests(APITestCase):
         self.assertEqual(question.year.year, '2081')
         self.assertEqual(question.year.subject.semester.name, 'Semester 1')
 
+    def test_staff_user_can_bulk_import_csv_metadata_without_defaults(self):
+        staff = User.objects.create_user(
+            username='csv-only-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        self.client.force_authenticate(user=staff)
+
+        csv_file = SimpleUploadedFile(
+            'questions_with_metadata.csv',
+            (
+                'Question ID,Semester,Subject,Year,Group,Question,Answer\n'
+                '44601,Semester 4,Database Management System,2080,Group B,'
+                '"What is normalization?","Normalization reduces redundancy."\n'
+            ).encode('utf-8'),
+            content_type='text/csv',
+        )
+
+        response = self.client.post(
+            '/api/accounts/admin/questions/bulk-import/',
+            {'file': csv_file},
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['imported_count'], 1)
+        self.assertEqual(response.data['errors'], [])
+
+        question = Question.objects.get(source_question_id='44601')
+        self.assertEqual(question.section.title, 'Group B')
+        self.assertEqual(question.year.year, '2080')
+        self.assertEqual(question.year.subject.name, 'Database Management System')
+        self.assertEqual(question.year.subject.semester.name, 'Semester 4')
+        self.assertEqual(question.answer_text, 'Normalization reduces redundancy.')
+
+    def test_staff_user_can_upload_answer_only_csv_for_existing_imported_question(self):
+        staff = User.objects.create_user(
+            username='answer-only-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        self.client.force_authenticate(user=staff)
+        semester = Semester.objects.create(name='Semester 1')
+        subject = Subject.objects.create(
+            semester=semester,
+            name='Introduction to Information Technology',
+        )
+        year = Year.objects.create(subject=subject, year='2081')
+        question = Question.objects.create(
+            year=year,
+            source_question_id='34605',
+            question_text='Compare primary memory with secondary memory.',
+            answer_text='Old answer.',
+            marks='5',
+            order=2,
+        )
+        csv_file = SimpleUploadedFile(
+            'year_2081_answers.csv',
+            (
+                'question_id,answer_markdown,image_paths,answer_source_url\n'
+                '34605,"Updated **markdown** answer.",images/34605_1.jpg,'
+                'https://example.com/question/34605\n'
+            ).encode('utf-8'),
+            content_type='text/csv',
+        )
+
+        response = self.client.post(
+            '/api/accounts/admin/questions/bulk-import/',
+            {'file': csv_file},
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['imported_count'], 1)
+        self.assertEqual(response.data['errors'], [])
+
+        question.refresh_from_db()
+        self.assertEqual(question.id, Question.objects.get(source_question_id='34605').id)
+        self.assertEqual(question.question_text, 'Compare primary memory with secondary memory.')
+        self.assertEqual(question.answer_text, 'Updated **markdown** answer.')
+        self.assertEqual(question.answer_image_paths, 'images/34605_1.jpg')
+        self.assertEqual(question.answer_source_url, 'https://example.com/question/34605')
+        self.assertEqual(question.marks, '5')
+        self.assertEqual(question.order, 2)
+
     def test_staff_user_can_approve_answer_contribution(self):
         staff = User.objects.create_user(
             username='review-admin',
@@ -636,6 +787,10 @@ class AuthApiTests(APITestCase):
         )
         student = User.objects.create_user(
             username='answer-helper',
+            password='pass12345',
+        )
+        other_student = User.objects.create_user(
+            username='other-answer-helper',
             password='pass12345',
         )
         semester = Semester.objects.create(name='Semester 2')
@@ -665,6 +820,187 @@ class AuthApiTests(APITestCase):
         contribution.refresh_from_db()
         self.assertEqual(contribution.reviewed_by, staff)
         self.assertIsNotNone(contribution.reviewed_at)
+        notification = Notification.objects.get(user=student)
+        self.assertEqual(notification.type, Notification.TYPE_CONTRIBUTION)
+        self.assertIn('accepted', notification.message)
+        self.assertEqual(
+            notification.link_path,
+            f'/semester/{semester.slug}/subject/{subject.slug}',
+        )
+        self.assertFalse(Notification.objects.filter(user=other_student).exists())
+
+    def test_staff_user_rejects_answer_contribution_with_reason_notification(self):
+        staff = User.objects.create_user(
+            username='reject-contribution-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        student = User.objects.create_user(
+            username='rejected-answer-helper',
+            password='pass12345',
+        )
+        other_student = User.objects.create_user(
+            username='not-the-contributor',
+            password='pass12345',
+        )
+        semester = Semester.objects.create(name='Semester 2')
+        subject = Subject.objects.create(semester=semester, name='Discrete Structure')
+        year = Year.objects.create(subject=subject, year='2081')
+        question = Question.objects.create(
+            year=year,
+            question_text='Define relation.',
+            answer_text='A relation is a subset of a Cartesian product.',
+        )
+        contribution = AnswerContribution.objects.create(
+            question=question,
+            user=student,
+            answer_text='Relation means related things.',
+        )
+        self.client.force_authenticate(user=staff)
+
+        missing_reason_response = self.client.patch(
+            f'/api/accounts/admin/answer-contributions/{contribution.id}/',
+            {'status': AnswerContribution.STATUS_REJECTED},
+            format='json',
+        )
+
+        self.assertEqual(missing_reason_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Notification.objects.count(), 0)
+
+        response = self.client.patch(
+            f'/api/accounts/admin/answer-contributions/{contribution.id}/',
+            {
+                'status': AnswerContribution.STATUS_REJECTED,
+                'rejection_reason': 'Please provide a clearer explanation.',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], AnswerContribution.STATUS_REJECTED)
+        self.assertEqual(
+            response.data['rejection_reason'],
+            'Please provide a clearer explanation.',
+        )
+        contribution.refresh_from_db()
+        self.assertEqual(contribution.reviewed_by, staff)
+        self.assertIsNotNone(contribution.reviewed_at)
+        self.assertEqual(
+            contribution.rejection_reason,
+            'Please provide a clearer explanation.',
+        )
+        notification = Notification.objects.get(user=student)
+        self.assertEqual(notification.type, Notification.TYPE_CONTRIBUTION)
+        self.assertIn('rejected', notification.message)
+        self.assertIn('Please provide a clearer explanation.', notification.message)
+        self.assertEqual(
+            notification.link_path,
+            f'/semester/{semester.slug}/subject/{subject.slug}',
+        )
+        self.assertFalse(Notification.objects.filter(user=other_student).exists())
+
+    def test_staff_user_can_edit_answer_contribution_before_approval(self):
+        staff = User.objects.create_user(
+            username='edit-contribution-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        student = User.objects.create_user(
+            username='caption-helper',
+            password='pass12345',
+        )
+        semester = Semester.objects.create(name='Semester 2')
+        subject = Subject.objects.create(semester=semester, name='Discrete Structure')
+        year = Year.objects.create(subject=subject, year='2081')
+        question = Question.objects.create(
+            year=year,
+            question_text='Define tree.',
+            answer_text='A tree is a connected acyclic graph.',
+        )
+        contribution = AnswerContribution.objects.create(
+            question=question,
+            user=student,
+            answer_text='Random heading\nA tree is connected and acyclic.',
+        )
+        self.client.force_authenticate(user=staff)
+
+        response = self.client.patch(
+            f'/api/accounts/admin/answer-contributions/{contribution.id}/',
+            {
+                'answer_text': 'A tree is connected and acyclic.',
+                'status': AnswerContribution.STATUS_APPROVED,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['answer_text'], 'A tree is connected and acyclic.')
+        self.assertEqual(response.data['status'], AnswerContribution.STATUS_APPROVED)
+        contribution.refresh_from_db()
+        self.assertEqual(contribution.answer_text, 'A tree is connected and acyclic.')
+        self.assertEqual(contribution.reviewed_by, staff)
+
+    def test_staff_user_can_replace_or_remove_answer_contribution_image(self):
+        staff = User.objects.create_user(
+            username='image-contribution-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        student = User.objects.create_user(
+            username='image-helper',
+            password='pass12345',
+        )
+        semester = Semester.objects.create(name='Semester 2')
+        subject = Subject.objects.create(semester=semester, name='Discrete Structure')
+        year = Year.objects.create(subject=subject, year='2081')
+        question = Question.objects.create(
+            year=year,
+            question_text='Define graph.',
+            answer_text='A graph has vertices and edges.',
+        )
+        contribution = AnswerContribution.objects.create(
+            question=question,
+            user=student,
+            answer_text='',
+        )
+        image_file = SimpleUploadedFile(
+            'answer.gif',
+            (
+                b'GIF87a\x01\x00\x01\x00\x80\x01\x00\x00\x00\x00'
+                b'\xff\xff\xff,\x00\x00\x00\x00\x01\x00\x01\x00'
+                b'\x00\x02\x02D\x01\x00;'
+            ),
+            content_type='image/gif',
+        )
+        self.client.force_authenticate(user=staff)
+
+        with tempfile.TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root):
+                image_response = self.client.patch(
+                    f'/api/accounts/admin/answer-contributions/{contribution.id}/',
+                    {
+                        'answer_text': '',
+                        'image': image_file,
+                    },
+                    format='multipart',
+                )
+                self.assertEqual(image_response.status_code, status.HTTP_200_OK)
+                self.assertTrue(image_response.data['image'])
+
+                remove_response = self.client.patch(
+                    f'/api/accounts/admin/answer-contributions/{contribution.id}/',
+                    {
+                        'answer_text': 'Text-only corrected answer.',
+                        'remove_image': 'true',
+                    },
+                    format='multipart',
+                )
+
+        self.assertEqual(remove_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(remove_response.data['image'], '')
+        self.assertEqual(remove_response.data['answer_text'], 'Text-only corrected answer.')
+        contribution.refresh_from_db()
+        self.assertFalse(contribution.image)
 
     def test_contact_message_can_be_submitted_without_login(self):
         response = self.client.post(

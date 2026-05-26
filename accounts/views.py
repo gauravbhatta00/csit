@@ -6,6 +6,7 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
 from django.core.mail import send_mail
+from PIL import Image, UnidentifiedImageError
 from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView
 from rest_framework.response import Response
@@ -1504,6 +1505,10 @@ class AdminQuestionListView(APIView):
 class AdminQuestionDetailView(APIView):
     permission_classes = [IsAdminUser]
 
+    def get(self, request, pk):
+        question = get_object_or_404(AdminQuestionListView().get_queryset(), pk=pk)
+        return Response(AdminQuestionListView().serialize_question(question))
+
     def patch(self, request, pk):
         question = get_object_or_404(Question.objects.select_related('year'), pk=pk)
         subject_id = request.data.get('subject_id')
@@ -1564,12 +1569,12 @@ class AdminQuestionBulkImportView(APIView):
 
     def get_value(self, row, *keys):
         normalized = {
-            (key or '').strip().lower(): (value or '').strip()
+            compact_match_value(key): clean_csv_value(value)
             for key, value in row.items()
         }
 
         for key in keys:
-            value = normalized.get(key)
+            value = normalized.get(compact_match_value(key))
             if value:
                 return value
 
@@ -1579,6 +1584,7 @@ class AdminQuestionBulkImportView(APIView):
         subject_id = self.get_value(row, 'subject_id')
         subject_slug = self.get_value(row, 'subject_slug', 'slug')
         subject_name = self.get_value(row, 'subject', 'subject_name')
+        semester = self.resolve_semester(row, default_semester_id)
 
         if subject_id:
             return Subject.objects.get(pk=subject_id)
@@ -1589,8 +1595,8 @@ class AdminQuestionBulkImportView(APIView):
         if subject_name:
             subjects = Subject.objects.filter(name__iexact=subject_name)
 
-            if default_semester_id:
-                subjects = subjects.filter(semester_id=default_semester_id)
+            if semester:
+                subjects = subjects.filter(semester=semester)
 
             count = subjects.count()
             if count == 1:
@@ -1608,10 +1614,14 @@ class AdminQuestionBulkImportView(APIView):
 
     def resolve_semester(self, row, default_semester_id):
         semester_id = self.get_value(row, 'semester_id')
-        semester_name = self.get_value(row, 'semester')
+        semester_slug = self.get_value(row, 'semester_slug')
+        semester_name = self.get_value(row, 'semester', 'semester_name')
 
         if semester_id:
             return Semester.objects.get(pk=semester_id)
+
+        if semester_slug:
+            return Semester.objects.get(slug=semester_slug)
 
         if semester_name:
             semester, _ = Semester.objects.get_or_create(name=semester_name)
@@ -1670,11 +1680,19 @@ class AdminQuestionBulkImportView(APIView):
 
     def get_existing_question(self, year, source_question_id, question_text):
         if source_question_id:
-            question = Question.objects.filter(
+            question = Question.objects.select_related(
+                'year',
+                'year__subject',
+                'year__subject__semester',
+                'section',
+            ).filter(
                 source_question_id=source_question_id,
             ).first()
             if question:
                 return question
+
+        if not year or not question_text:
+            return None
 
         return Question.objects.filter(
             year=year,
@@ -1710,53 +1728,84 @@ class AdminQuestionBulkImportView(APIView):
         errors = []
 
         for index, row in enumerate(reader, start=2):
-            question_id = self.get_value(row, 'question_id')
-            question_text = self.get_value(row, 'question_text', 'question')
+            question_id = self.get_value(row, 'question_id', 'source_question_id')
+            existing_question = self.get_existing_question(None, question_id, '')
+            question_text = (
+                self.get_value(row, 'question_text', 'question', 'prompt')
+                or (existing_question.question_text if existing_question else '')
+            )
             answer_data = answers_by_question_id.get(question_id, {})
             answer_text = (
                 self.get_value(row, 'answer_text', 'answer', 'answer_markdown')
                 or answer_data.get('answer_text', '')
+                or (existing_question.answer_text if existing_question else '')
             )
-            year_value = self.get_value(row, 'year') or default_year
-            marks = self.get_value(row, 'marks')
+            year_value = (
+                self.get_value(row, 'year')
+                or default_year
+                or (existing_question.year.year if existing_question else '')
+            )
+            marks = self.get_value(row, 'marks') or (
+                existing_question.marks if existing_question else ''
+            )
             order_value = self.get_value(row, 'order')
             question_number = self.get_value(row, 'question_number')
             section_title = self.get_value(row, 'section', 'group')
             exam_time = self.get_value(row, 'exam_time')
             instructions = self.get_value(row, 'instructions')
-            source_url = self.get_value(row, 'source_url', 'question_source_url')
+            source_url = self.get_value(row, 'source_url', 'question_source_url') or (
+                existing_question.source_url if existing_question else ''
+            )
             answer_source_url = (
                 self.get_value(row, 'answer_source_url')
                 or answer_data.get('answer_source_url', '')
+                or (existing_question.answer_source_url if existing_question else '')
             )
             answer_image_paths = (
                 self.get_value(row, 'image_paths', 'answer_image_paths')
                 or answer_data.get('answer_image_paths', '')
+                or (existing_question.answer_image_paths if existing_question else '')
             )
 
             if not question_text:
-                errors.append({'row': index, 'error': 'Question text is required.'})
+                errors.append({
+                    'row': index,
+                    'error': 'Question text is required unless question_id matches an existing question.',
+                })
                 continue
 
             if not year_value:
                 errors.append({'row': index, 'error': 'Year is required.'})
                 continue
 
-            try:
-                subject = self.resolve_or_create_subject(
-                    row,
-                    default_subject_id,
-                    default_semester_id,
-                )
-            except Subject.DoesNotExist:
-                errors.append({'row': index, 'error': 'Subject was not found.'})
-                continue
-            except ValueError as exc:
-                errors.append({'row': index, 'error': str(exc)})
-                continue
+            if existing_question and not any([
+                self.get_value(row, 'subject_id'),
+                self.get_value(row, 'subject_slug', 'slug'),
+                self.get_value(row, 'subject', 'subject_name'),
+                default_subject_id,
+            ]):
+                subject = existing_question.year.subject
+            else:
+                try:
+                    subject = self.resolve_or_create_subject(
+                        row,
+                        default_subject_id,
+                        default_semester_id,
+                    )
+                except Subject.DoesNotExist:
+                    errors.append({'row': index, 'error': 'Subject was not found.'})
+                    continue
+                except Semester.DoesNotExist:
+                    errors.append({'row': index, 'error': 'Semester was not found.'})
+                    continue
+                except ValueError as exc:
+                    errors.append({'row': index, 'error': str(exc)})
+                    continue
 
             try:
-                order = int(order_value or question_number or 0)
+                order = int(order_value or question_number or (
+                    existing_question.order if existing_question else 0
+                ))
             except ValueError:
                 order = 0
 
@@ -1780,10 +1829,17 @@ class AdminQuestionBulkImportView(APIView):
                 )
 
             question = self.get_existing_question(year, question_id, question_text)
+            existing_section = (
+                question.section
+                if question and question.section and question.section.year_id == year.id
+                else None
+            )
             question_values = {
                 'year': year,
-                'section': section,
-                'source_question_id': question_id,
+                'section': section if section_title else existing_section,
+                'source_question_id': question_id or (
+                    question.source_question_id if question else ''
+                ),
                 'source_url': source_url,
                 'answer_source_url': answer_source_url,
                 'answer_image_paths': answer_image_paths,
@@ -1833,6 +1889,7 @@ class AdminAnswerContributionListView(APIView):
             'answer_text': contribution.answer_text,
             'image': contribution.image.url if contribution.image else '',
             'status': contribution.status,
+            'rejection_reason': contribution.rejection_reason,
             'reviewed_by': (
                 contribution.reviewed_by.username
                 if contribution.reviewed_by
@@ -1867,34 +1924,129 @@ class AdminAnswerContributionListView(APIView):
 
 class AdminAnswerContributionDetailView(APIView):
     permission_classes = [IsAdminUser]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def notify_status_change(self, contribution):
+        subject = contribution.question.year.subject
+        question_text = ' '.join(contribution.question.question_text.split())
+        if len(question_text) > 90:
+            question_text = f'{question_text[:87]}...'
+
+        if contribution.status == AnswerContribution.STATUS_APPROVED:
+            message = f'Your answer contribution for "{question_text}" was accepted.'
+        elif contribution.status == AnswerContribution.STATUS_REJECTED:
+            message = (
+                f'Your answer contribution for "{question_text}" was rejected. '
+                f'Reason: {contribution.rejection_reason}'
+            )
+        else:
+            return
+
+        Notification.objects.create(
+            user=contribution.user,
+            type=Notification.TYPE_CONTRIBUTION,
+            message=message,
+            link_path=f'/semester/{subject.semester.slug}/subject/{subject.slug}',
+        )
 
     def patch(self, request, pk):
         contribution = get_object_or_404(AnswerContribution, pk=pk)
+        original_status = contribution.status
         status_value = (request.data.get('status') or '').strip()
+        rejection_reason = str(request.data.get('rejection_reason') or '').strip()
         valid_statuses = {
             AnswerContribution.STATUS_PENDING,
             AnswerContribution.STATUS_APPROVED,
             AnswerContribution.STATUS_REJECTED,
         }
+        update_fields = []
+        should_notify = False
 
-        if status_value not in valid_statuses:
-            return Response({'detail': 'A valid status is required.'}, status=400)
+        if 'answer_text' in request.data:
+            contribution.answer_text = (request.data.get('answer_text') or '').strip()
+            update_fields.append('answer_text')
 
-        contribution.status = status_value
-        if status_value == AnswerContribution.STATUS_PENDING:
-            contribution.reviewed_by = None
-            contribution.reviewed_at = None
-        else:
-            contribution.reviewed_by = request.user
-            contribution.reviewed_at = timezone.now()
-        contribution.save(
-            update_fields=[
-                'status',
-                'reviewed_by',
-                'reviewed_at',
-                'updated_at',
-            ]
+        remove_image = (
+            'remove_image' in request.data
+            and parse_csv_bool(request.data.get('remove_image'), default=False)
         )
+        image = request.FILES.get('image')
+
+        if image:
+            try:
+                Image.open(image).verify()
+                image.seek(0)
+            except (OSError, UnidentifiedImageError):
+                return Response({'detail': 'Upload a valid image file.'}, status=400)
+
+            if contribution.image:
+                contribution.image.delete(save=False)
+            contribution.image = image
+            update_fields.append('image')
+        elif remove_image:
+            if contribution.image:
+                contribution.image.delete(save=False)
+            contribution.image = None
+            update_fields.append('image')
+
+        if not contribution.answer_text and not contribution.image:
+            return Response(
+                {'detail': 'Answer text or image is required.'},
+                status=400,
+            )
+
+        if 'status' in request.data:
+            if status_value not in valid_statuses:
+                return Response({'detail': 'A valid status is required.'}, status=400)
+
+            contribution.status = status_value
+            update_fields.append('status')
+            if status_value == AnswerContribution.STATUS_PENDING:
+                contribution.reviewed_by = None
+                contribution.reviewed_at = None
+                contribution.rejection_reason = ''
+                update_fields.append('rejection_reason')
+            else:
+                if status_value == AnswerContribution.STATUS_REJECTED:
+                    if not rejection_reason:
+                        return Response(
+                            {'detail': 'Rejection reason is required.'},
+                            status=400,
+                        )
+                    contribution.rejection_reason = rejection_reason
+                    update_fields.append('rejection_reason')
+                elif contribution.rejection_reason:
+                    contribution.rejection_reason = ''
+                    update_fields.append('rejection_reason')
+                contribution.reviewed_by = request.user
+                contribution.reviewed_at = timezone.now()
+                should_notify = status_value != original_status
+            update_fields.extend(['reviewed_by', 'reviewed_at'])
+        elif 'rejection_reason' in request.data:
+            if contribution.status != AnswerContribution.STATUS_REJECTED:
+                return Response(
+                    {
+                        'detail': (
+                            'Rejection reason can only be set when rejecting '
+                            'a contribution.'
+                        ),
+                    },
+                    status=400,
+                )
+            if not rejection_reason:
+                return Response(
+                    {'detail': 'Rejection reason is required.'},
+                    status=400,
+                )
+            contribution.rejection_reason = rejection_reason
+            update_fields.append('rejection_reason')
+
+        if update_fields:
+            update_fields.append('updated_at')
+            with transaction.atomic():
+                contribution.save(update_fields=sorted(set(update_fields)))
+                if should_notify:
+                    self.notify_status_change(contribution)
         contribution = AdminAnswerContributionListView().get_queryset().get(
             pk=contribution.pk,
         )
@@ -2138,20 +2290,92 @@ class AdminTestimonialDetailView(APIView):
 class AdminNotificationListView(APIView):
     permission_classes = [IsAdminUser]
 
+    def serialize_notification(self, notification):
+        return {
+            'id': notification.id,
+            'username': notification.user.username,
+            'type': notification.type,
+            'message': notification.message,
+            'link_path': notification.link_path,
+            'is_read': notification.is_read,
+            'created_at': notification.created_at,
+        }
+
     def get(self, request):
         notifications = Notification.objects.select_related('user').order_by('-created_at')[:250]
         return Response([
-            {
-                'id': notification.id,
-                'username': notification.user.username,
-                'type': notification.type,
-                'message': notification.message,
-                'link_path': notification.link_path,
-                'is_read': notification.is_read,
-                'created_at': notification.created_at,
-            }
+            self.serialize_notification(notification)
             for notification in notifications
         ])
+
+    def post(self, request):
+        message = str(request.data.get('message') or '').strip()
+        link_path = str(request.data.get('link_path') or '').strip()
+        recipient = str(
+            request.data.get('recipient')
+            or request.data.get('target')
+            or ('user' if request.data.get('user_id') else 'all')
+        ).strip().lower()
+
+        if not message:
+            return Response({'detail': 'Message is required.'}, status=400)
+
+        if len(link_path) > 255:
+            return Response(
+                {'detail': 'Link path must be 255 characters or fewer.'},
+                status=400,
+            )
+
+        if link_path and not link_path.startswith('/'):
+            return Response(
+                {'detail': 'Link path must start with /.'},
+                status=400,
+            )
+
+        User = request.user.__class__
+        if recipient in {'user', 'specific'}:
+            user_id = request.data.get('user_id')
+            if not user_id:
+                return Response(
+                    {'detail': 'user_id is required for a specific user.'},
+                    status=400,
+                )
+            users = [get_object_or_404(User, pk=user_id)]
+        elif recipient in {'all', 'users'}:
+            users = list(User.objects.filter(is_active=True).order_by('id'))
+        else:
+            return Response(
+                {'detail': 'Recipient must be all or user.'},
+                status=400,
+            )
+
+        if not users:
+            return Response(
+                {'detail': 'No active users were found.'},
+                status=400,
+            )
+
+        with transaction.atomic():
+            notifications = [
+                Notification.objects.create(
+                    user=user,
+                    type=Notification.TYPE_CUSTOM,
+                    message=message,
+                    link_path=link_path,
+                )
+                for user in users
+            ]
+
+        return Response(
+            {
+                'sent_count': len(notifications),
+                'notifications': [
+                    self.serialize_notification(notification)
+                    for notification in notifications[:250]
+                ],
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class AdminNotificationDetailView(APIView):
@@ -2331,6 +2555,58 @@ class AdminMockTestQuestionListView(APIView):
 
 class AdminMockTestQuestionDetailView(APIView):
     permission_classes = [IsAdminUser]
+
+    def serialize_question(self, question):
+        return {
+            'id': question.id,
+            'question_text': question.question_text,
+            'option_a': question.option_a,
+            'option_b': question.option_b,
+            'option_c': question.option_c,
+            'option_d': question.option_d,
+            'correct_option': question.correct_option,
+            'marks': question.marks,
+        }
+
+    def patch(self, request, pk):
+        question = get_object_or_404(MockTestQuestion, pk=pk)
+
+        for field in [
+            'question_text',
+            'option_a',
+            'option_b',
+            'option_c',
+            'option_d',
+        ]:
+            if field in request.data:
+                value = (request.data.get(field) or '').strip()
+                if not value:
+                    return Response(
+                        {'detail': f'{field.replace("_", " ").title()} is required.'},
+                        status=400,
+                    )
+                setattr(question, field, value)
+
+        if 'correct_option' in request.data:
+            correct_option = (request.data.get('correct_option') or '').strip().upper()[:1]
+            if correct_option not in {'A', 'B', 'C', 'D'}:
+                return Response(
+                    {'detail': 'Correct option must be A, B, C, or D.'},
+                    status=400,
+                )
+            question.correct_option = correct_option
+
+        if 'marks' in request.data:
+            try:
+                marks = int(request.data.get('marks') or 1)
+            except (TypeError, ValueError):
+                return Response({'detail': 'Marks must be a whole number.'}, status=400)
+            if marks < 1:
+                return Response({'detail': 'Marks must be at least 1.'}, status=400)
+            question.marks = marks
+
+        question.save()
+        return Response(self.serialize_question(question))
 
     def delete(self, request, pk):
         question = get_object_or_404(MockTestQuestion, pk=pk)
