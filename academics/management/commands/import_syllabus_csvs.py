@@ -64,11 +64,14 @@ def append_text(current, value):
 
 
 def unique_unit_slug(syllabus, title, used_slugs):
-    base = slugify(title) or 'unit'
+    max_length = SyllabusUnit._meta.get_field('slug').max_length or 50
+    base = (slugify(title) or 'unit')[:max_length].rstrip('-') or 'unit'
     slug = base
     index = 2
     while slug in used_slugs or SyllabusUnit.objects.filter(syllabus=syllabus, slug=slug).exists():
-        slug = f'{base}-{index}'
+        suffix = f'-{index}'
+        slug_base = base[:max_length - len(suffix)].rstrip('-') or 'unit'
+        slug = f'{slug_base}{suffix}'
         index += 1
     used_slugs.add(slug)
     return slug

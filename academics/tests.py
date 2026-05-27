@@ -68,6 +68,13 @@ class AcademicApiTests(APITestCase):
             answer_text='Approved student answer.',
             status=AnswerContribution.STATUS_APPROVED,
         )
+        AnswerContribution.objects.create(
+            question=question,
+            user=contributor,
+            answer_text='Promoted main answer.',
+            status=AnswerContribution.STATUS_APPROVED,
+            is_main_answer=True,
+        )
 
         response = self.client.get(
             f'/api/subjects/{self.subject.slug}/questions/{self.year.year}/'

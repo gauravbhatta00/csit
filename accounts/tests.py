@@ -14,7 +14,13 @@ from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import AccessToken
 
 from academics.models import AnswerContribution, MockTest, Note, Question, Semester, Subject, Syllabus, SyllabusSection, SyllabusUnit, Year
-from .models import ContactMessage, EmailSubscription, Notification, Testimonial
+from .models import (
+    ContactMessage,
+    ContributionSubmission,
+    EmailSubscription,
+    Notification,
+    Testimonial,
+)
 
 User = get_user_model()
 
@@ -449,6 +455,38 @@ class AuthApiTests(APITestCase):
         self.assertEqual(syllabus.units.get().title, 'Problem Solving')
         self.assertEqual(SyllabusSection.objects.get(syllabus=syllabus).title, 'Recommended Books')
 
+    def test_staff_user_can_import_syllabus_csv_with_long_unit_slug(self):
+        staff = User.objects.create_user(
+            username='syllabus-long-slug-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        self.client.force_authenticate(user=staff)
+        semester = Semester.objects.create(name='Semester 2')
+        subject = Subject.objects.create(semester=semester, name='Object Oriented Programming')
+        csv_file = SimpleUploadedFile(
+            'object_oriented_programming.csv',
+            (
+                'semester,course_code,course_title,credit_hrs,full_marks,pass_marks,nature,section,unit_no,unit_title,hours,content\n'
+                'II,CSC166,Object Oriented Programming,3,60 + 20 + 20,24 + 8 + 8,,Course Contents,6,"Virtual Function, Polymorphism, and miscellaneous C++ Features",5 Hrs.,Polymorphism and virtual functions.\n'
+            ).encode('utf-8'),
+            content_type='text/csv',
+        )
+
+        response = self.client.post(
+            f'/api/accounts/admin/subjects/{subject.id}/syllabus/import-csv/',
+            {'file': csv_file},
+            format='multipart',
+            HTTP_X_FORWARDED_PROTO='https',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        unit = SyllabusUnit.objects.get(syllabus__subject=subject)
+        self.assertLessEqual(
+            len(unit.slug),
+            SyllabusUnit._meta.get_field('slug').max_length,
+        )
+
     def test_staff_user_can_import_subject_notes_csv(self):
         staff = User.objects.create_user(
             username='notes-csv-admin',
@@ -829,6 +867,54 @@ class AuthApiTests(APITestCase):
         )
         self.assertFalse(Notification.objects.filter(user=other_student).exists())
 
+    def test_staff_user_can_promote_answer_contribution_to_main_answer(self):
+        staff = User.objects.create_user(
+            username='main-answer-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        student = User.objects.create_user(
+            username='main-answer-helper',
+            password='pass12345',
+        )
+        semester = Semester.objects.create(name='Semester 2')
+        subject = Subject.objects.create(semester=semester, name='Discrete Structure')
+        year = Year.objects.create(subject=subject, year='2081')
+        question = Question.objects.create(
+            year=year,
+            question_text='Define graph.',
+            answer_text='Old main answer.',
+        )
+        previous_main = AnswerContribution.objects.create(
+            question=question,
+            user=student,
+            answer_text='Previous main answer.',
+            status=AnswerContribution.STATUS_APPROVED,
+            is_main_answer=True,
+        )
+        contribution = AnswerContribution.objects.create(
+            question=question,
+            user=student,
+            answer_text='Promoted main answer.',
+        )
+        self.client.force_authenticate(user=staff)
+
+        response = self.client.patch(
+            f'/api/accounts/admin/answer-contributions/{contribution.id}/',
+            {'use_as_main_answer': True},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], AnswerContribution.STATUS_APPROVED)
+        self.assertTrue(response.data['is_main_answer'])
+        question.refresh_from_db()
+        contribution.refresh_from_db()
+        previous_main.refresh_from_db()
+        self.assertEqual(question.answer_text, 'Promoted main answer.')
+        self.assertTrue(contribution.is_main_answer)
+        self.assertFalse(previous_main.is_main_answer)
+
     def test_staff_user_rejects_answer_contribution_with_reason_notification(self):
         staff = User.objects.create_user(
             username='reject-contribution-admin',
@@ -1018,6 +1104,50 @@ class AuthApiTests(APITestCase):
         message = ContactMessage.objects.get()
         self.assertEqual(message.name, 'Student User')
         self.assertEqual(message.email, 'student@example.com')
+
+    def test_contribution_submission_can_be_reviewed_by_admin(self):
+        response = self.client.post(
+            '/api/accounts/contributions/',
+            {
+                'name': 'Student User',
+                'email': 'Student@Example.com',
+                'contribution_type': 'Chapter notes',
+                'semester': 'Semester 3',
+                'subject': 'Data Structure and Algorithm',
+                'resource_link': 'https://example.com/notes',
+                'details': 'I can share stack and queue notes.',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(ContributionSubmission.objects.count(), 1)
+        submission = ContributionSubmission.objects.get()
+        self.assertEqual(submission.email, 'student@example.com')
+        self.assertEqual(submission.status, ContributionSubmission.STATUS_PENDING)
+
+        staff = User.objects.create_user(
+            username='contribution-review-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        self.client.force_authenticate(user=staff)
+
+        list_response = self.client.get(
+            '/api/accounts/admin/contributions/?status=pending',
+        )
+        update_response = self.client.patch(
+            f'/api/accounts/admin/contributions/{submission.id}/',
+            {'status': ContributionSubmission.STATUS_APPROVED},
+            format='json',
+        )
+
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(list_response.data), 1)
+        self.assertEqual(update_response.status_code, status.HTTP_200_OK)
+        submission.refresh_from_db()
+        self.assertEqual(submission.status, ContributionSubmission.STATUS_APPROVED)
+        self.assertEqual(submission.reviewed_by, staff)
 
     def test_email_subscription_can_be_submitted_without_login(self):
         response = self.client.post(

@@ -152,6 +152,7 @@ class YearQuestionListView(ListAPIView):
                 'contributions',
                 queryset=AnswerContribution.objects.filter(
                     status=AnswerContribution.STATUS_APPROVED,
+                    is_main_answer=False,
                 ).select_related('user'),
                 to_attr='approved_contributions_cache',
             )
@@ -188,6 +189,7 @@ class QuestionContributionListView(APIView):
         question = self.get_question(pk)
         contributions = question.contributions.filter(
             status=AnswerContribution.STATUS_APPROVED,
+            is_main_answer=False,
         ).select_related('user')
         return Response(AnswerContributionSerializer(contributions, many=True).data)
 

@@ -153,6 +153,7 @@ class QuestionSerializer(serializers.ModelSerializer):
         if contributions is None:
             contributions = obj.contributions.filter(
                 status=AnswerContribution.STATUS_APPROVED,
+                is_main_answer=False,
             ).select_related('user')
         return ApprovedAnswerContributionSerializer(contributions, many=True).data
 

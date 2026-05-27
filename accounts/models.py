@@ -122,6 +122,55 @@ class ContactMessage(models.Model):
         return f"{self.name} - {self.email}"
 
 
+class ContributionSubmission(models.Model):
+    STATUS_PENDING = 'pending'
+    STATUS_APPROVED = 'approved'
+    STATUS_REJECTED = 'rejected'
+
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_APPROVED, 'Approved'),
+        (STATUS_REJECTED, 'Rejected'),
+    ]
+
+    user = models.ForeignKey(
+        CustomUser,
+        on_delete=models.SET_NULL,
+        related_name='contribution_submissions',
+        null=True,
+        blank=True,
+    )
+    name = models.CharField(max_length=120)
+    email = models.EmailField()
+    contribution_type = models.CharField(max_length=80)
+    semester = models.CharField(max_length=80, blank=True)
+    subject = models.CharField(max_length=160, blank=True)
+    resource_link = models.URLField(blank=True)
+    details = models.TextField()
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=STATUS_PENDING,
+    )
+    rejection_reason = models.TextField(blank=True)
+    reviewed_by = models.ForeignKey(
+        CustomUser,
+        on_delete=models.SET_NULL,
+        related_name='reviewed_contribution_submissions',
+        null=True,
+        blank=True,
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.contribution_type} - {self.name} - {self.status}"
+
+
 class EmailSubscription(models.Model):
     email = models.EmailField(unique=True)
     is_active = models.BooleanField(default=True)

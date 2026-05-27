@@ -9,6 +9,7 @@ from rest_framework_simplejwt.settings import api_settings
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 from .models import (
     ContactMessage,
+    ContributionSubmission,
     CustomUser,
     EmailSubscription,
     Notification,
@@ -135,6 +136,71 @@ class ContactMessageSerializer(serializers.ModelSerializer):
         value = value.strip()
         if not value:
             raise serializers.ValidationError("Message is required.")
+        return value
+
+
+class ContributionSubmissionSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source='user.username', read_only=True)
+    reviewed_by_username = serializers.CharField(
+        source='reviewed_by.username',
+        read_only=True,
+    )
+
+    class Meta:
+        model = ContributionSubmission
+        fields = [
+            'id',
+            'username',
+            'name',
+            'email',
+            'contribution_type',
+            'semester',
+            'subject',
+            'resource_link',
+            'details',
+            'status',
+            'rejection_reason',
+            'reviewed_by_username',
+            'reviewed_at',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = [
+            'id',
+            'username',
+            'status',
+            'rejection_reason',
+            'reviewed_by_username',
+            'reviewed_at',
+            'created_at',
+            'updated_at',
+        ]
+
+    def validate_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Name is required.")
+        return value
+
+    def validate_email(self, value):
+        return value.strip().lower()
+
+    def validate_contribution_type(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Contribution type is required.")
+        return value
+
+    def validate_semester(self, value):
+        return value.strip()
+
+    def validate_subject(self, value):
+        return value.strip()
+
+    def validate_details(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Details are required.")
         return value
 
 

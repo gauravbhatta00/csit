@@ -174,11 +174,17 @@ class AnswerContributionAdmin(admin.ModelAdmin):
         'user',
         'image',
         'status',
+        'is_main_answer',
         'reviewed_by',
         'created_at',
         'reviewed_at',
     ]
-    list_filter = ['status', 'question__year__subject__semester', 'question__year__subject']
+    list_filter = [
+        'status',
+        'is_main_answer',
+        'question__year__subject__semester',
+        'question__year__subject',
+    ]
     search_fields = ['answer_text', 'user__username', 'question__question_text']
     readonly_fields = ['created_at', 'updated_at', 'reviewed_at']
 

@@ -59,10 +59,35 @@ SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', DEFAULT_DEV_SECRET_KEY)
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = env_bool('DJANGO_DEBUG', True)
 
-if not DEBUG and SECRET_KEY == DEFAULT_DEV_SECRET_KEY:
-    raise ImproperlyConfigured('DJANGO_SECRET_KEY must be set when DJANGO_DEBUG=False.')
+# Production environment validation
+if not DEBUG:
+    # Check critical production settings
+    if SECRET_KEY == DEFAULT_DEV_SECRET_KEY or 'change-me' in SECRET_KEY.lower() or 'replace-this' in SECRET_KEY.lower():
+        raise ImproperlyConfigured(
+            'DJANGO_SECRET_KEY must be set to a secure random value when DJANGO_DEBUG=False. '
+            'Generate one with: python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"'
+        )
+    
+    # Ensure Google credentials are set in production
+    google_client_id = os.environ.get('GOOGLE_CLIENT_ID', '').strip()
+    google_client_secret = os.environ.get('GOOGLE_CLIENT_SECRET', '').strip()
+    if not google_client_id or not google_client_secret:
+        raise ImproperlyConfigured(
+            'GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be set in production environment.'
+        )
+    
+    # Check that SSL redirect is enabled
+    if not env_bool('DJANGO_SECURE_SSL_REDIRECT', False):
+        import warnings
+        warnings.warn(
+            'DJANGO_SECURE_SSL_REDIRECT is not enabled. Enable HTTPS redirects in production.',
+            RuntimeWarning,
+        )
 
-ALLOWED_HOSTS = env_list('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1')
+ALLOWED_HOSTS = env_list(
+    'DJANGO_ALLOWED_HOSTS',
+    'localhost,127.0.0.1',
+)
 
 
 # Application definition
@@ -84,6 +109,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'csit_platform.middleware.SimpleCorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -203,7 +229,19 @@ DEFAULT_FROM_EMAIL = os.environ.get(
 )
 
 CSRF_TRUSTED_ORIGINS = env_list('DJANGO_CSRF_TRUSTED_ORIGINS')
+CORS_ALLOWED_ORIGINS = env_list('DJANGO_CORS_ALLOWED_ORIGINS')
+CORS_ALLOW_CREDENTIALS = env_bool('DJANGO_CORS_ALLOW_CREDENTIALS', True)
+CORS_ALLOWED_METHODS = env_list(
+    'DJANGO_CORS_ALLOWED_METHODS',
+    'DELETE,GET,OPTIONS,PATCH,POST,PUT',
+)
+CORS_ALLOWED_HEADERS = env_list(
+    'DJANGO_CORS_ALLOWED_HEADERS',
+    'accept,authorization,content-type,origin,user-agent,x-csrftoken,x-requested-with',
+)
+CORS_PREFLIGHT_MAX_AGE = int(os.environ.get('DJANGO_CORS_PREFLIGHT_MAX_AGE', '86400'))
 SECURE_SSL_REDIRECT = env_bool('DJANGO_SECURE_SSL_REDIRECT', False)
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 SESSION_COOKIE_SECURE = env_bool('DJANGO_SESSION_COOKIE_SECURE', not DEBUG)
 CSRF_COOKIE_SECURE = env_bool('DJANGO_CSRF_COOKIE_SECURE', not DEBUG)
 SECURE_HSTS_SECONDS = int(os.environ.get('DJANGO_SECURE_HSTS_SECONDS', '0'))

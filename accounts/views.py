@@ -44,12 +44,14 @@ from academics.models import (
 )
 from .models import (
     ContactMessage,
+    ContributionSubmission,
     EmailSubscription,
     Notification,
     Testimonial,
 )
 from .serializers import (
     ContactMessageSerializer,
+    ContributionSubmissionSerializer,
     EmailSubscriptionSerializer,
     GoogleLoginSerializer,
     NotificationSerializer,
@@ -202,11 +204,14 @@ def choose_subject_csv_rows(subject, rows):
 
 
 def unique_syllabus_unit_slug(syllabus, title, used_slugs):
-    base = slugify(title) or 'unit'
+    max_length = SyllabusUnit._meta.get_field('slug').max_length or 50
+    base = (slugify(title) or 'unit')[:max_length].rstrip('-') or 'unit'
     slug = base
     index = 2
     while slug in used_slugs or SyllabusUnit.objects.filter(syllabus=syllabus, slug=slug).exists():
-        slug = f'{base}-{index}'
+        suffix = f'-{index}'
+        slug_base = base[:max_length - len(suffix)].rstrip('-') or 'unit'
+        slug = f'{slug_base}{suffix}'
         index += 1
     used_slugs.add(slug)
     return slug
@@ -446,6 +451,44 @@ class GoogleLoginView(APIView):
         return user
 
 
+class GoogleCallbackView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        """Handle OAuth2 callback from Google"""
+        code = request.query_params.get('code')
+        state = request.query_params.get('state')
+        error = request.query_params.get('error')
+
+        if error:
+            logger.error('Google OAuth callback error: %s', error)
+            return Response(
+                {'detail': f'Google authentication failed: {error}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not code:
+            logger.error('Google OAuth callback missing authorization code')
+            return Response(
+                {'detail': 'Missing authorization code'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # In a real OAuth flow, you would exchange the code for tokens here
+        # and then redirect to the frontend with the authorization result.
+        # For now, return a message indicating the callback was received.
+        frontend_url = settings.FRONTEND_URL or settings.FRONTEND_BASE_URL
+        redirect_uri = f"{frontend_url}/auth/google/callback?code={code}"
+        if state:
+            redirect_uri += f"&state={state}"
+
+        return Response({
+            'detail': 'Authorization code received. Please proceed to frontend.',
+            'code': code,
+            'redirect_uri': redirect_uri
+        })
+
+
 class ContactMessageCreateView(APIView):
     permission_classes = [AllowAny]
 
@@ -454,6 +497,21 @@ class ContactMessageCreateView(APIView):
         serializer.is_valid(raise_exception=True)
         message = serializer.save()
         return Response(ContactMessageSerializer(message).data, status=201)
+
+
+class ContributionSubmissionCreateView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = ContributionSubmissionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        submission = serializer.save(
+            user=request.user if request.user.is_authenticated else None,
+        )
+        return Response(
+            ContributionSubmissionSerializer(submission).data,
+            status=201,
+        )
 
 
 class EmailSubscriptionCreateView(APIView):
@@ -1590,7 +1648,9 @@ class AdminQuestionBulkImportView(APIView):
             return Subject.objects.get(pk=subject_id)
 
         if subject_slug:
-            return Subject.objects.get(slug=subject_slug)
+            subject = Subject.objects.filter(slug=subject_slug).first()
+            if subject:
+                return subject
 
         if subject_name:
             subjects = Subject.objects.filter(name__iexact=subject_name)
@@ -1809,52 +1869,63 @@ class AdminQuestionBulkImportView(APIView):
             except ValueError:
                 order = 0
 
-            year, _ = Year.objects.get_or_create(subject=subject, year=year_value)
-            update_fields = []
-            if exam_time and year.time != exam_time:
-                year.time = exam_time
-                update_fields.append('time')
-            if instructions and year.instructions != instructions:
-                year.instructions = instructions
-                update_fields.append('instructions')
-            if update_fields:
-                year.save(update_fields=update_fields)
+            try:
+                year, _ = Year.objects.get_or_create(subject=subject, year=year_value)
+                update_fields = []
+                if exam_time and year.time != exam_time:
+                    year.time = exam_time
+                    update_fields.append('time')
+                if instructions and year.instructions != instructions:
+                    year.instructions = instructions
+                    update_fields.append('instructions')
+                if update_fields:
+                    year.save(update_fields=update_fields)
 
-            section = None
-            if section_title:
-                section, _ = QuestionSection.objects.get_or_create(
-                    year=year,
-                    title=section_title[:80],
-                    defaults={'order': 0},
+                section = None
+                if section_title:
+                    section, _ = QuestionSection.objects.get_or_create(
+                        year=year,
+                        title=section_title[:80],
+                        defaults={'order': 0},
+                    )
+
+                question = self.get_existing_question(year, question_id, question_text)
+                existing_section = (
+                    question.section
+                    if question and question.section and question.section.year_id == year.id
+                    else None
                 )
-
-            question = self.get_existing_question(year, question_id, question_text)
-            existing_section = (
-                question.section
-                if question and question.section and question.section.year_id == year.id
-                else None
-            )
-            question_values = {
-                'year': year,
-                'section': section if section_title else existing_section,
-                'source_question_id': question_id or (
-                    question.source_question_id if question else ''
-                ),
-                'source_url': source_url,
-                'answer_source_url': answer_source_url,
-                'answer_image_paths': answer_image_paths,
-                'question_text': question_text,
-                'answer_text': answer_text,
-                'marks': marks,
-                'order': order,
-            }
-            if question:
-                for field, value in question_values.items():
-                    setattr(question, field, value)
-                question.save()
-            else:
-                question = Question.objects.create(**question_values)
-            imported.append(AdminQuestionListView().serialize_question(question))
+                question_values = {
+                    'year': year,
+                    'section': section if section_title else existing_section,
+                    'source_question_id': question_id or (
+                        question.source_question_id if question else ''
+                    ),
+                    'source_url': source_url,
+                    'answer_source_url': answer_source_url,
+                    'answer_image_paths': answer_image_paths,
+                    'question_text': question_text,
+                    'answer_text': answer_text,
+                    'marks': marks,
+                    'order': order,
+                }
+                if question:
+                    for field, value in question_values.items():
+                        setattr(question, field, value)
+                    question.save()
+                else:
+                    question = Question.objects.create(**question_values)
+                imported.append(AdminQuestionListView().serialize_question(question))
+            except Exception as exc:
+                logger.exception(
+                    'Question CSV import failed at row %s for question_id=%s subject=%s year=%s',
+                    index,
+                    question_id,
+                    getattr(subject, 'slug', ''),
+                    year_value,
+                )
+                errors.append({'row': index, 'error': str(exc)})
+                continue
 
         if not imported and errors:
             return Response(
@@ -1889,6 +1960,7 @@ class AdminAnswerContributionListView(APIView):
             'answer_text': contribution.answer_text,
             'image': contribution.image.url if contribution.image else '',
             'status': contribution.status,
+            'is_main_answer': contribution.is_main_answer,
             'rejection_reason': contribution.rejection_reason,
             'reviewed_by': (
                 contribution.reviewed_by.username
@@ -1922,6 +1994,76 @@ class AdminAnswerContributionListView(APIView):
         ])
 
 
+class AdminContributionSubmissionListView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get_queryset(self):
+        return ContributionSubmission.objects.select_related('user', 'reviewed_by')
+
+    def get(self, request):
+        submissions = self.get_queryset()
+        status_filter = (request.query_params.get('status') or '').strip()
+        type_filter = (request.query_params.get('type') or '').strip()
+
+        if status_filter:
+            submissions = submissions.filter(status=status_filter)
+        if type_filter:
+            submissions = submissions.filter(contribution_type=type_filter)
+
+        return Response(
+            ContributionSubmissionSerializer(submissions[:250], many=True).data,
+        )
+
+
+class AdminContributionSubmissionDetailView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def patch(self, request, pk):
+        submission = get_object_or_404(ContributionSubmission, pk=pk)
+        status_value = (request.data.get('status') or '').strip()
+        rejection_reason = str(request.data.get('rejection_reason') or '').strip()
+        valid_statuses = {
+            ContributionSubmission.STATUS_PENDING,
+            ContributionSubmission.STATUS_APPROVED,
+            ContributionSubmission.STATUS_REJECTED,
+        }
+
+        if not status_value:
+            return Response({'detail': 'Status is required.'}, status=400)
+        if status_value not in valid_statuses:
+            return Response({'detail': 'A valid status is required.'}, status=400)
+        if status_value == ContributionSubmission.STATUS_REJECTED and not rejection_reason:
+            return Response({'detail': 'Rejection reason is required.'}, status=400)
+
+        submission.status = status_value
+        if status_value == ContributionSubmission.STATUS_PENDING:
+            submission.reviewed_by = None
+            submission.reviewed_at = None
+            submission.rejection_reason = ''
+        else:
+            submission.reviewed_by = request.user
+            submission.reviewed_at = timezone.now()
+            submission.rejection_reason = (
+                rejection_reason
+                if status_value == ContributionSubmission.STATUS_REJECTED
+                else ''
+            )
+
+        submission.save(
+            update_fields=[
+                'status',
+                'rejection_reason',
+                'reviewed_by',
+                'reviewed_at',
+                'updated_at',
+            ],
+        )
+        submission = AdminContributionSubmissionListView().get_queryset().get(
+            pk=submission.pk,
+        )
+        return Response(ContributionSubmissionSerializer(submission).data)
+
+
 class AdminAnswerContributionDetailView(APIView):
     permission_classes = [IsAdminUser]
     parser_classes = [JSONParser, MultiPartParser, FormParser]
@@ -1949,11 +2091,22 @@ class AdminAnswerContributionDetailView(APIView):
             link_path=f'/semester/{subject.semester.slug}/subject/{subject.slug}',
         )
 
+    def build_main_answer_text(self, contribution):
+        answer_text = contribution.answer_text.strip()
+        if contribution.image:
+            image_markdown = f'![Submitted answer]({contribution.image.url})'
+            return f'{answer_text}\n\n{image_markdown}'.strip()
+        return answer_text
+
     def patch(self, request, pk):
         contribution = get_object_or_404(AnswerContribution, pk=pk)
         original_status = contribution.status
         status_value = (request.data.get('status') or '').strip()
         rejection_reason = str(request.data.get('rejection_reason') or '').strip()
+        use_as_main_answer = (
+            'use_as_main_answer' in request.data
+            and parse_csv_bool(request.data.get('use_as_main_answer'), default=False)
+        )
         valid_statuses = {
             AnswerContribution.STATUS_PENDING,
             AnswerContribution.STATUS_APPROVED,
@@ -2005,6 +2158,9 @@ class AdminAnswerContributionDetailView(APIView):
                 contribution.reviewed_by = None
                 contribution.reviewed_at = None
                 contribution.rejection_reason = ''
+                if contribution.is_main_answer:
+                    contribution.is_main_answer = False
+                    update_fields.append('is_main_answer')
                 update_fields.append('rejection_reason')
             else:
                 if status_value == AnswerContribution.STATUS_REJECTED:
@@ -2020,6 +2176,9 @@ class AdminAnswerContributionDetailView(APIView):
                     update_fields.append('rejection_reason')
                 contribution.reviewed_by = request.user
                 contribution.reviewed_at = timezone.now()
+                if status_value != AnswerContribution.STATUS_APPROVED and contribution.is_main_answer:
+                    contribution.is_main_answer = False
+                    update_fields.append('is_main_answer')
                 should_notify = status_value != original_status
             update_fields.extend(['reviewed_by', 'reviewed_at'])
         elif 'rejection_reason' in request.data:
@@ -2041,10 +2200,36 @@ class AdminAnswerContributionDetailView(APIView):
             contribution.rejection_reason = rejection_reason
             update_fields.append('rejection_reason')
 
+        if use_as_main_answer:
+            contribution.status = AnswerContribution.STATUS_APPROVED
+            contribution.reviewed_by = request.user
+            contribution.reviewed_at = timezone.now()
+            contribution.rejection_reason = ''
+            contribution.is_main_answer = True
+            update_fields.extend([
+                'status',
+                'reviewed_by',
+                'reviewed_at',
+                'rejection_reason',
+                'is_main_answer',
+            ])
+            should_notify = original_status != AnswerContribution.STATUS_APPROVED
+
         if update_fields:
             update_fields.append('updated_at')
             with transaction.atomic():
                 contribution.save(update_fields=sorted(set(update_fields)))
+                if use_as_main_answer:
+                    AnswerContribution.objects.filter(
+                        question_id=contribution.question_id,
+                        is_main_answer=True,
+                    ).exclude(pk=contribution.pk).update(is_main_answer=False)
+                    question = contribution.question
+                    question.answer_text = self.build_main_answer_text(contribution)
+                    question.answer_image_paths = (
+                        contribution.image.name if contribution.image else ''
+                    )
+                    question.save(update_fields=['answer_text', 'answer_image_paths'])
                 if should_notify:
                     self.notify_status_change(contribution)
         contribution = AdminAnswerContributionListView().get_queryset().get(

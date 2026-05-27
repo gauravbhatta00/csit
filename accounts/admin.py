@@ -2,6 +2,7 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 from .models import (
     ContactMessage,
+    ContributionSubmission,
     CustomUser,
     EmailSubscription,
     Notification,
@@ -44,6 +45,23 @@ class ContactMessageAdmin(admin.ModelAdmin):
     search_fields = ['name', 'email', 'message']
     list_editable = ['is_resolved']
     readonly_fields = ['created_at']
+    date_hierarchy = 'created_at'
+
+
+@admin.register(ContributionSubmission)
+class ContributionSubmissionAdmin(admin.ModelAdmin):
+    list_display = [
+        'contribution_type',
+        'name',
+        'email',
+        'subject',
+        'status',
+        'reviewed_by',
+        'created_at',
+    ]
+    list_filter = ['status', 'contribution_type', 'created_at']
+    search_fields = ['name', 'email', 'subject', 'semester', 'details']
+    readonly_fields = ['created_at', 'updated_at', 'reviewed_at']
     date_hierarchy = 'created_at'
 
 

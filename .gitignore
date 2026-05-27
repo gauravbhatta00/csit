@@ -70,5 +70,5 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-
+.env.example
 *.csv

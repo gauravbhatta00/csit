@@ -221,6 +221,7 @@ class AnswerContribution(models.Model):
         choices=STATUS_CHOICES,
         default=STATUS_PENDING,
     )
+    is_main_answer = models.BooleanField(default=False)
     rejection_reason = models.TextField(blank=True)
     reviewed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
