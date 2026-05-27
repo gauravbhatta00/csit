@@ -59,12 +59,54 @@ class SyllabusSerializer(serializers.ModelSerializer):
         ]
 
 
+class SyllabusSummarySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Syllabus
+        fields = ['id', 'pdf_file', 'course_title', 'course_no', 'updated_at']
+
+
 class SubjectSerializer(serializers.ModelSerializer):
     syllabus = SyllabusSerializer(read_only=True)
+    year_count = serializers.IntegerField(read_only=True, default=0)
+    question_count = serializers.IntegerField(read_only=True, default=0)
+    mock_test_count = serializers.IntegerField(read_only=True, default=0)
+    discussion_count = serializers.IntegerField(read_only=True, default=0)
 
     class Meta:
         model = Subject
-        fields = ['id', 'name', 'slug', 'semester', 'syllabus']
+        fields = [
+            'id',
+            'name',
+            'slug',
+            'semester',
+            'syllabus',
+            'year_count',
+            'question_count',
+            'mock_test_count',
+            'discussion_count',
+        ]
+
+
+class SubjectListSerializer(serializers.ModelSerializer):
+    syllabus = SyllabusSummarySerializer(read_only=True)
+    year_count = serializers.IntegerField(read_only=True, default=0)
+    question_count = serializers.IntegerField(read_only=True, default=0)
+    mock_test_count = serializers.IntegerField(read_only=True, default=0)
+    discussion_count = serializers.IntegerField(read_only=True, default=0)
+
+    class Meta:
+        model = Subject
+        fields = [
+            'id',
+            'name',
+            'slug',
+            'semester',
+            'syllabus',
+            'year_count',
+            'question_count',
+            'mock_test_count',
+            'discussion_count',
+        ]
 
 
 class NoteSerializer(serializers.ModelSerializer):
@@ -105,7 +147,17 @@ class SemesterSerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'slug', 'subjects']
 
 
+class SemesterListSerializer(serializers.ModelSerializer):
+    subjects = SubjectListSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Semester
+        fields = ['id', 'name', 'slug', 'subjects']
+
+
 class YearSerializer(serializers.ModelSerializer):
+    question_count = serializers.IntegerField(read_only=True, default=0)
+
     class Meta:
         model = Year
         fields = [
@@ -119,6 +171,7 @@ class YearSerializer(serializers.ModelSerializer):
             'pass_marks',
             'time',
             'instructions',
+            'question_count',
         ]
 
 

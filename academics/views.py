@@ -4,7 +4,7 @@ from rest_framework.generics import ListAPIView, RetrieveAPIView
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from PIL import Image, UnidentifiedImageError
-from django.db.models import Prefetch, Q
+from django.db.models import Count, Prefetch, Q
 from django.shortcuts import get_object_or_404
 from .models import (
     Discussion,
@@ -30,7 +30,10 @@ from .serializers import (
     MockTestResultSerializer,
     MockTestSerializer,
     PlatformDiscussionSerializer,
-    SemesterSerializer, SubjectSerializer,
+    SemesterListSerializer,
+    SemesterSerializer,
+    SubjectListSerializer,
+    SubjectSerializer,
     SyllabusSerializer, YearSerializer,
     QuestionSerializer, QuestionPaperSerializer,
     NoteSerializer,
@@ -52,13 +55,23 @@ def get_subject_by_slug_or_id(value):
 
 class SemesterListView(ListAPIView):
     permission_classes = [AllowAny]
-    queryset = Semester.objects.prefetch_related('subjects__syllabus__units', 'subjects__syllabus__sections')
-    serializer_class = SemesterSerializer
+    serializer_class = SemesterListSerializer
+
+    def get_queryset(self):
+        subjects = Subject.objects.select_related('syllabus').annotate(
+            year_count=Count('years', distinct=True),
+            question_count=Count('years__questions', distinct=True),
+            mock_test_count=Count('mock_tests', distinct=True),
+            discussion_count=Count('discussions', distinct=True),
+        )
+        return Semester.objects.prefetch_related(
+            Prefetch('subjects', queryset=subjects),
+        )
 
 
 class SemesterSubjectListView(ListAPIView):
     permission_classes = [AllowAny]
-    serializer_class = SubjectSerializer
+    serializer_class = SubjectListSerializer
 
     def get_queryset(self):
         # ✅ Filter by slug instead of pk
@@ -66,9 +79,11 @@ class SemesterSubjectListView(ListAPIView):
         query = Q(semester__slug=semester_value)
         if str(semester_value).isdigit():
             query |= Q(semester_id=int(semester_value))
-        return Subject.objects.filter(query).select_related('syllabus').prefetch_related(
-            'syllabus__units',
-            'syllabus__sections',
+        return Subject.objects.filter(query).select_related('syllabus').annotate(
+            year_count=Count('years', distinct=True),
+            question_count=Count('years__questions', distinct=True),
+            mock_test_count=Count('mock_tests', distinct=True),
+            discussion_count=Count('discussions', distinct=True),
         )
 
 
@@ -105,7 +120,9 @@ class SubjectYearListView(ListAPIView):
 
     def get_queryset(self):
         subject = get_subject_by_slug_or_id(self.kwargs['subject_slug'])
-        return Year.objects.filter(subject=subject)
+        return Year.objects.filter(subject=subject).annotate(
+            question_count=Count('questions', distinct=True),
+        )
 
 
 class SubjectNoteListView(ListAPIView):

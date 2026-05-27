@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 
 from pathlib import Path
 import os
+from urllib.parse import urlparse
 from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -50,6 +51,13 @@ def env_bool(name, default=False):
 def env_list(name, default=''):
     value = os.environ.get(name, default)
     return [item.strip() for item in value.split(',') if item.strip()]
+
+
+def env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
 
 
 # SECURITY WARNING: keep the secret key used in production secret!
@@ -184,6 +192,71 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 MEDIA_URL = '/media/'
 MEDIA_ROOT = Path(os.environ.get('DJANGO_MEDIA_ROOT', BASE_DIR / 'media'))
+MEDIA_IMAGE_FORMAT = os.environ.get('DJANGO_MEDIA_IMAGE_FORMAT', 'WEBP').strip().upper()
+MEDIA_IMAGE_QUALITY = env_int('DJANGO_MEDIA_IMAGE_QUALITY', 82)
+MEDIA_WEBP_METHOD = env_int('DJANGO_MEDIA_WEBP_METHOD', 6)
+
+CLOUDFLARE_R2_ACCOUNT_ID = os.environ.get('CLOUDFLARE_R2_ACCOUNT_ID', '').strip()
+CLOUDFLARE_R2_ACCESS_KEY_ID = os.environ.get('CLOUDFLARE_R2_ACCESS_KEY_ID', '').strip()
+CLOUDFLARE_R2_SECRET_ACCESS_KEY = os.environ.get('CLOUDFLARE_R2_SECRET_ACCESS_KEY', '').strip()
+CLOUDFLARE_R2_BUCKET_NAME = os.environ.get('CLOUDFLARE_R2_BUCKET_NAME', '').strip()
+CLOUDFLARE_R2_ENDPOINT_URL = os.environ.get(
+    'CLOUDFLARE_R2_ENDPOINT_URL',
+    f'https://{CLOUDFLARE_R2_ACCOUNT_ID}.r2.cloudflarestorage.com'
+    if CLOUDFLARE_R2_ACCOUNT_ID else '',
+).strip()
+CLOUDFLARE_R2_PUBLIC_URL = os.environ.get('CLOUDFLARE_R2_PUBLIC_URL', '').strip().rstrip('/')
+CLOUDFLARE_R2_CUSTOM_DOMAIN = urlparse(CLOUDFLARE_R2_PUBLIC_URL).netloc if CLOUDFLARE_R2_PUBLIC_URL else ''
+USE_CLOUDFLARE_R2_MEDIA = env_bool('USE_CLOUDFLARE_R2_MEDIA', False)
+
+STORAGES = {
+    'default': {
+        'BACKEND': 'csit_platform.storage.OptimizedFileSystemStorage',
+    },
+    'staticfiles': {
+        'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
+    },
+}
+
+if USE_CLOUDFLARE_R2_MEDIA:
+    missing_r2_settings = [
+        name for name, value in {
+            'CLOUDFLARE_R2_ACCOUNT_ID': CLOUDFLARE_R2_ACCOUNT_ID,
+            'CLOUDFLARE_R2_ACCESS_KEY_ID': CLOUDFLARE_R2_ACCESS_KEY_ID,
+            'CLOUDFLARE_R2_SECRET_ACCESS_KEY': CLOUDFLARE_R2_SECRET_ACCESS_KEY,
+            'CLOUDFLARE_R2_BUCKET_NAME': CLOUDFLARE_R2_BUCKET_NAME,
+            'CLOUDFLARE_R2_ENDPOINT_URL': CLOUDFLARE_R2_ENDPOINT_URL,
+        }.items()
+        if not value
+    ]
+    if missing_r2_settings:
+        raise ImproperlyConfigured(
+            'Missing Cloudflare R2 media settings: '
+            + ', '.join(missing_r2_settings)
+        )
+
+    if CLOUDFLARE_R2_PUBLIC_URL:
+        MEDIA_URL = f'{CLOUDFLARE_R2_PUBLIC_URL}/'
+
+    STORAGES['default'] = {
+        'BACKEND': 'csit_platform.storage.R2MediaStorage',
+        'OPTIONS': {
+            'bucket_name': CLOUDFLARE_R2_BUCKET_NAME,
+            'access_key': CLOUDFLARE_R2_ACCESS_KEY_ID,
+            'secret_key': CLOUDFLARE_R2_SECRET_ACCESS_KEY,
+            'endpoint_url': CLOUDFLARE_R2_ENDPOINT_URL,
+            'region_name': 'auto',
+            'addressing_style': 'path',
+            'signature_version': 's3v4',
+            'custom_domain': CLOUDFLARE_R2_CUSTOM_DOMAIN or None,
+            'default_acl': None,
+            'querystring_auth': False,
+            'file_overwrite': False,
+            'object_parameters': {
+                'CacheControl': 'max-age=31536000, public',
+            },
+        },
+    }
 
 
 STATIC_URL = 'static/'

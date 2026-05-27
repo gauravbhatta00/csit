@@ -1,10 +1,13 @@
 import csv
 import io
 import logging
+import os
+import uuid
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
+from django.core.files.storage import default_storage
 from django.core.mail import send_mail
 from PIL import Image, UnidentifiedImageError
 from rest_framework.views import APIView
@@ -158,6 +161,33 @@ def validate_pdf_upload(uploaded_file):
     content_type = getattr(uploaded_file, 'content_type', '')
     if content_type and content_type not in {'application/pdf', 'application/x-pdf', 'application/octet-stream'}:
         return 'Upload a valid PDF file.'
+    return None
+
+
+def validate_answer_image_upload(uploaded_file):
+    if not uploaded_file:
+        return 'Image is required.'
+
+    max_size = 5 * 1024 * 1024
+    if uploaded_file.size > max_size:
+        return 'Image must be 5 MB or smaller.'
+
+    content_type = getattr(uploaded_file, 'content_type', '')
+    allowed_content_types = {
+        'image/jpeg',
+        'image/png',
+        'image/webp',
+        'image/gif',
+    }
+    if content_type and content_type not in allowed_content_types:
+        return 'Upload a JPG, PNG, WEBP, or GIF image.'
+
+    try:
+        Image.open(uploaded_file).verify()
+        uploaded_file.seek(0)
+    except (OSError, UnidentifiedImageError):
+        return 'Upload a valid image file.'
+
     return None
 
 
@@ -1619,6 +1649,35 @@ class AdminQuestionDetailView(APIView):
         question = get_object_or_404(Question, pk=pk)
         question.delete()
         return Response(status=204)
+
+
+class AdminAnswerImageUploadView(APIView):
+    permission_classes = [IsAdminUser]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        image = request.FILES.get('image')
+        validation_error = validate_answer_image_upload(image)
+        if validation_error:
+            return Response({'detail': validation_error}, status=400)
+
+        original_name = image.name or 'answer-image'
+        _root, extension = os.path.splitext(original_name)
+        extension = extension.lower() if extension.lower() in {
+            '.jpg',
+            '.jpeg',
+            '.png',
+            '.webp',
+            '.gif',
+        } else '.png'
+        filename = f'{uuid.uuid4().hex}{extension}'
+        saved_path = default_storage.save(f'answer_images/{filename}', image)
+        url = default_storage.url(saved_path)
+
+        return Response({
+            'url': url,
+            'markdown': f'![Answer image]({url})',
+        }, status=201)
 
 
 class AdminQuestionBulkImportView(APIView):

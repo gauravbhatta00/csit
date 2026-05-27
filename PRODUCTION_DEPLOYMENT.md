@@ -52,7 +52,18 @@ This document outlines the steps to prepare and deploy the Sabaiko CSIT platform
 - [ ] Run `python manage.py collectstatic --no-input`
 - [ ] Configure web server to serve static files
 
-### 8. File Security
+### 8. Media Files
+- [ ] Create a Cloudflare R2 bucket for user-uploaded media
+- [ ] Set `USE_CLOUDFLARE_R2_MEDIA=True`
+- [ ] Set `CLOUDFLARE_R2_ACCOUNT_ID`
+- [ ] Set `CLOUDFLARE_R2_ACCESS_KEY_ID`
+- [ ] Set `CLOUDFLARE_R2_SECRET_ACCESS_KEY`
+- [ ] Set `CLOUDFLARE_R2_BUCKET_NAME`
+- [ ] Set `CLOUDFLARE_R2_PUBLIC_URL` if using a public bucket URL or custom domain
+- [ ] Optionally set `DJANGO_MEDIA_IMAGE_FORMAT=WEBP` or `AVIF`
+- [ ] Optionally tune `DJANGO_MEDIA_IMAGE_QUALITY=82`
+
+### 9. File Security
 - [ ] Ensure `.env` file is NOT committed to version control
 - [ ] Verify `.gitignore` includes `.env` and `.env.*` (except `.env.example`)
 - [ ] Never commit `db.sqlite3` (unless absolutely necessary for testing)
@@ -62,7 +73,7 @@ This document outlines the steps to prepare and deploy the Sabaiko CSIT platform
   chmod 755 csit_platform/
   ```
 
-### 9. HTTPS & SSL
+### 10. HTTPS & SSL
 - [ ] Obtain SSL certificate (Let's Encrypt recommended)
 - [ ] Configure web server (Nginx/Apache) with SSL
 - [ ] Set up auto-renewal for certificates
@@ -134,6 +145,17 @@ This document outlines the steps to prepare and deploy the Sabaiko CSIT platform
 - `GOOGLE_CLIENT_ID=594875084700-7r78gapr8o9po7dj8vhq0m94ghb4klqh.apps.googleusercontent.com`
 - `GOOGLE_CLIENT_SECRET=<your-secret>`
 - `FRONTEND_URL=https://ramrocsit.com`
+- `USE_CLOUDFLARE_R2_MEDIA=True`
+- `CLOUDFLARE_R2_ACCOUNT_ID=<account-id>`
+- `CLOUDFLARE_R2_ACCESS_KEY_ID=<r2-access-key>`
+- `CLOUDFLARE_R2_SECRET_ACCESS_KEY=<r2-secret-key>`
+- `CLOUDFLARE_R2_BUCKET_NAME=<bucket-name>`
+- `CLOUDFLARE_R2_PUBLIC_URL=https://<public-media-domain>`
+
+When R2 media is enabled, every Django `FileField` and `ImageField` uses the
+R2 bucket through the default storage backend. PDFs and other files are stored
+as-is. Image uploads are normalized and compressed before storage according to
+`DJANGO_MEDIA_IMAGE_FORMAT`.
 
 ### Recommended for Production
 - `DJANGO_SECURE_SSL_REDIRECT=True`
@@ -141,6 +163,14 @@ This document outlines the steps to prepare and deploy the Sabaiko CSIT platform
 - `DJANGO_CSRF_COOKIE_SECURE=True`
 - `DJANGO_SECURE_HSTS_SECONDS=31536000`
 - `DJANGO_EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend`
+- `DJANGO_MEDIA_IMAGE_FORMAT=WEBP`
+- `DJANGO_MEDIA_IMAGE_QUALITY=82`
+- `DJANGO_MEDIA_WEBP_METHOD=6`
+
+Use `DJANGO_MEDIA_IMAGE_FORMAT=AVIF` only if the production Pillow build
+supports AVIF encoding. If AVIF encoding fails at runtime, uploads fall back to
+WEBP. Use `DJANGO_MEDIA_IMAGE_FORMAT=ORIGINAL` only when image conversion needs
+to be temporarily disabled.
 
 ## Security Considerations
 
