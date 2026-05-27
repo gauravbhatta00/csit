@@ -526,6 +526,17 @@ class ContactMessageCreateView(APIView):
         serializer = ContactMessageSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         message = serializer.save()
+        send_mail(
+            subject=f'New contact form message from {message.name}',
+            message=(
+                f'Name: {message.name}\n'
+                f'Email: {message.email}\n\n'
+                f'Message:\n{message.message}'
+            ),
+            from_email=settings.CONTACT_EMAIL_FROM,
+            recipient_list=[settings.CONTACT_EMAIL_RECIPIENT],
+            fail_silently=False,
+        )
         return Response(ContactMessageSerializer(message).data, status=201)
 
 

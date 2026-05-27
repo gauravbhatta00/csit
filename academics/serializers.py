@@ -184,6 +184,9 @@ class QuestionSectionSerializer(serializers.ModelSerializer):
 class QuestionSerializer(serializers.ModelSerializer):
     section = QuestionSectionSerializer(read_only=True)
     approved_contributions = serializers.SerializerMethodField()
+    answer_source_url = serializers.SerializerMethodField()
+    answer_image_paths = serializers.SerializerMethodField()
+    answer_text = serializers.SerializerMethodField()
 
     class Meta:
         model = Question
@@ -202,6 +205,8 @@ class QuestionSerializer(serializers.ModelSerializer):
         ]
 
     def get_approved_contributions(self, obj):
+        if not self.can_view_answers():
+            return []
         contributions = getattr(obj, 'approved_contributions_cache', None)
         if contributions is None:
             contributions = obj.contributions.filter(
@@ -209,6 +214,19 @@ class QuestionSerializer(serializers.ModelSerializer):
                 is_main_answer=False,
             ).select_related('user')
         return ApprovedAnswerContributionSerializer(contributions, many=True).data
+
+    def get_answer_source_url(self, obj):
+        return obj.answer_source_url if self.can_view_answers() else ''
+
+    def get_answer_image_paths(self, obj):
+        return obj.answer_image_paths if self.can_view_answers() else ''
+
+    def get_answer_text(self, obj):
+        return obj.answer_text if self.can_view_answers() else ''
+
+    def can_view_answers(self):
+        request = self.context.get('request')
+        return bool(request and request.user and request.user.is_authenticated)
 
 
 class ApprovedAnswerContributionSerializer(serializers.ModelSerializer):

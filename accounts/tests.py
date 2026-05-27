@@ -1088,6 +1088,11 @@ class AuthApiTests(APITestCase):
         contribution.refresh_from_db()
         self.assertFalse(contribution.image)
 
+    @override_settings(
+        EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
+        CONTACT_EMAIL_FROM='hi@ramrocsit.com',
+        CONTACT_EMAIL_RECIPIENT='hi@ramrocsit.com',
+    )
     def test_contact_message_can_be_submitted_without_login(self):
         response = self.client.post(
             '/api/accounts/contact/',
@@ -1104,6 +1109,10 @@ class AuthApiTests(APITestCase):
         message = ContactMessage.objects.get()
         self.assertEqual(message.name, 'Student User')
         self.assertEqual(message.email, 'student@example.com')
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ['hi@ramrocsit.com'])
+        self.assertEqual(mail.outbox[0].from_email, 'hi@ramrocsit.com')
+        self.assertIn('Please add more resources', mail.outbox[0].body)
 
     def test_contribution_submission_can_be_reviewed_by_admin(self):
         response = self.client.post(

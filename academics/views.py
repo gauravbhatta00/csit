@@ -53,6 +53,22 @@ def get_subject_by_slug_or_id(value):
     return get_object_or_404(Subject, build_slug_or_id_query(value))
 
 
+def parse_mock_test_question_ids(request_data):
+    selected_ids = (
+        request_data.get('question_ids')
+        or request_data.get('attempt_question_ids')
+        or request_data.get('selected_question_ids')
+        or []
+    )
+    if isinstance(selected_ids, str):
+        selected_ids = [
+            value.strip()
+            for value in selected_ids.split(',')
+            if value.strip()
+        ]
+    return {str(question_id) for question_id in selected_ids}
+
+
 class SemesterListView(ListAPIView):
     permission_classes = [AllowAny]
     serializer_class = SemesterListSerializer
@@ -270,8 +286,28 @@ class SubmitMockTestView(APIView):
             return Response({'detail': 'Test not found.'}, status=404)
 
         answers = request.data.get('answers', {})
+        if not isinstance(answers, dict):
+            return Response({'detail': 'Answers must be an object.'}, status=400)
+
+        question_id_values = parse_mock_test_question_ids(request.data) or set(answers.keys())
+        try:
+            question_ids = {int(question_id) for question_id in question_id_values}
+        except (TypeError, ValueError):
+            return Response({'detail': 'Question IDs must be integers.'}, status=400)
+
         score = 0
-        questions = list(mock_test.questions.all())
+        question_queryset = mock_test.questions.all()
+        if question_ids:
+            question_queryset = question_queryset.filter(id__in=question_ids)
+        questions = list(question_queryset)
+
+        if question_ids and len(questions) != len(question_ids):
+            return Response(
+                {'detail': 'One or more submitted questions do not belong to this test.'},
+                status=400,
+            )
+
+        total_marks = sum(question.marks for question in questions)
 
         for question in questions:
             submitted = (answers.get(str(question.id)) or '').upper()
@@ -282,7 +318,7 @@ class SubmitMockTestView(APIView):
             user=request.user,
             mock_test=mock_test,
             score=score,
-            total_marks=mock_test.total_marks,
+            total_marks=total_marks,
         )
 
         MockTestAnswer.objects.bulk_create([
@@ -301,9 +337,9 @@ class SubmitMockTestView(APIView):
 
         return Response({
             'score': score,
-            'total_marks': mock_test.total_marks,
-            'percentage': round((score / mock_test.total_marks) * 100, 2)
-            if mock_test.total_marks else 0,
+            'total_marks': total_marks,
+            'percentage': round((score / total_marks) * 100, 2)
+            if total_marks else 0,
             'result_id': result.id,
         })
 

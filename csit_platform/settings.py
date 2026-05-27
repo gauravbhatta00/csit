@@ -296,10 +296,18 @@ EMAIL_BACKEND = os.environ.get(
     'DJANGO_EMAIL_BACKEND',
     'django.core.mail.backends.console.EmailBackend',
 )
+EMAIL_HOST = os.environ.get('DJANGO_EMAIL_HOST', 'smtp.zoho.com')
+EMAIL_PORT = env_int('DJANGO_EMAIL_PORT', 587)
+EMAIL_HOST_USER = os.environ.get('DJANGO_EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.environ.get('DJANGO_EMAIL_HOST_PASSWORD', '')
+EMAIL_USE_TLS = env_bool('DJANGO_EMAIL_USE_TLS', True)
+EMAIL_USE_SSL = env_bool('DJANGO_EMAIL_USE_SSL', False)
 DEFAULT_FROM_EMAIL = os.environ.get(
     'DJANGO_DEFAULT_FROM_EMAIL',
     'Sabaiko CSIT <noreply@sabaikocsit.com>',
 )
+CONTACT_EMAIL_RECIPIENT = os.environ.get('CONTACT_EMAIL_RECIPIENT', 'hi@ramrocsit.com')
+CONTACT_EMAIL_FROM = os.environ.get('CONTACT_EMAIL_FROM', CONTACT_EMAIL_RECIPIENT)
 
 CSRF_TRUSTED_ORIGINS = env_list('DJANGO_CSRF_TRUSTED_ORIGINS')
 CORS_ALLOWED_ORIGINS = env_list('DJANGO_CORS_ALLOWED_ORIGINS')

@@ -34,11 +34,35 @@ class AcademicApiTests(APITestCase):
         )
         self.year = Year.objects.create(subject=self.subject, year='2080')
 
-    def test_question_answers_are_visible_without_login(self):
+    def test_question_answers_are_hidden_without_login(self):
         Question.objects.create(
             year=self.year,
             question_text='Define mean.',
             answer_text='Mean is the arithmetic average.',
+            answer_source_url='https://example.com/answer',
+            answer_image_paths='images/mean.webp',
+            marks='2',
+        )
+
+        response = self.client.get(
+            f'/api/subjects/{self.subject.slug}/questions/{self.year.year}/'
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data[0]['question_text'], 'Define mean.')
+        self.assertEqual(response.data[0]['answer_text'], '')
+        self.assertEqual(response.data[0]['answer_source_url'], '')
+        self.assertEqual(response.data[0]['answer_image_paths'], '')
+
+    def test_question_answers_are_visible_when_logged_in(self):
+        user = User.objects.create_user(username='answer-reader', password='pass12345')
+        self.client.force_authenticate(user=user)
+        Question.objects.create(
+            year=self.year,
+            question_text='Define mean.',
+            answer_text='Mean is the arithmetic average.',
+            answer_source_url='https://example.com/answer',
+            answer_image_paths='images/mean.webp',
             marks='2',
         )
 
@@ -48,9 +72,12 @@ class AcademicApiTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data[0]['answer_text'], 'Mean is the arithmetic average.')
+        self.assertEqual(response.data[0]['answer_source_url'], 'https://example.com/answer')
+        self.assertEqual(response.data[0]['answer_image_paths'], 'images/mean.webp')
 
     def test_only_approved_contributions_are_visible_with_questions(self):
         contributor = User.objects.create_user(username='helper', password='pass12345')
+        self.client.force_authenticate(user=contributor)
         question = Question.objects.create(
             year=self.year,
             question_text='Define variance.',
@@ -290,16 +317,79 @@ class AcademicApiTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['score'], 1)
-        self.assertEqual(response.data['total_marks'], 3)
+        self.assertEqual(response.data['total_marks'], 1)
         result = MockTestResult.objects.get(id=response.data['result_id'])
         self.assertEqual(result.score, 1)
-        self.assertEqual(MockTestAnswer.objects.filter(result=result).count(), 2)
-        unanswered = MockTestAnswer.objects.get(
-            result=result,
-            question=second_question,
+        self.assertEqual(result.total_marks, 1)
+        self.assertEqual(MockTestAnswer.objects.filter(result=result).count(), 1)
+        self.assertFalse(
+            MockTestAnswer.objects.filter(
+                result=result,
+                question=second_question,
+            ).exists()
         )
-        self.assertEqual(unanswered.selected_option, '')
-        self.assertFalse(unanswered.is_correct)
+
+    def test_mock_test_submit_scores_selected_question_ids_only(self):
+        user = User.objects.create_user(username='subset-tester', password='pass12345')
+        self.client.force_authenticate(user=user)
+        mock_test = MockTest.objects.create(
+            subject=self.subject,
+            title='Stats subset',
+            total_marks=4,
+        )
+        first_question = MockTestQuestion.objects.create(
+            mock_test=mock_test,
+            question_text='2 + 2?',
+            option_a='4',
+            option_b='3',
+            option_c='2',
+            option_d='1',
+            correct_option='A',
+            marks=1,
+        )
+        second_question = MockTestQuestion.objects.create(
+            mock_test=mock_test,
+            question_text='5 - 3?',
+            option_a='1',
+            option_b='2',
+            option_c='3',
+            option_d='4',
+            correct_option='B',
+            marks=2,
+        )
+        MockTestQuestion.objects.create(
+            mock_test=mock_test,
+            question_text='10 - 7?',
+            option_a='1',
+            option_b='2',
+            option_c='3',
+            option_d='4',
+            correct_option='C',
+            marks=1,
+        )
+
+        response = self.client.post(
+            f'/api/mock-tests/{mock_test.id}/submit/',
+            {
+                'question_ids': [first_question.id, second_question.id],
+                'answers': {str(first_question.id): 'A'},
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['score'], 1)
+        self.assertEqual(response.data['total_marks'], 3)
+        result = MockTestResult.objects.get(id=response.data['result_id'])
+        self.assertEqual(result.answers.count(), 2)
+
+        detail_response = self.client.get(
+            f'/api/mock-tests/results/{result.id}/',
+        )
+
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data['total_marks'], 3)
+        self.assertEqual(len(detail_response.data['answers']), 2)
 
     def test_reply_creates_notification_for_discussion_owner(self):
         owner = User.objects.create_user(username='owner', password='pass12345')

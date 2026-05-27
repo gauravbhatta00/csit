@@ -40,6 +40,8 @@ This document outlines the steps to prepare and deploy the Sabaiko CSIT platform
 - [ ] Set `DJANGO_EMAIL_HOST_PASSWORD`
 - [ ] Set `DJANGO_EMAIL_USE_TLS=True`
 - [ ] Update `DJANGO_DEFAULT_FROM_EMAIL`
+- [ ] Set `CONTACT_EMAIL_RECIPIENT=hi@ramrocsit.com`
+- [ ] Set `CONTACT_EMAIL_FROM=hi@ramrocsit.com`
 
 ### 6. Database Configuration
 - [ ] Use a production database (PostgreSQL recommended, not SQLite)
@@ -151,6 +153,15 @@ This document outlines the steps to prepare and deploy the Sabaiko CSIT platform
 - `CLOUDFLARE_R2_SECRET_ACCESS_KEY=<r2-secret-key>`
 - `CLOUDFLARE_R2_BUCKET_NAME=<bucket-name>`
 - `CLOUDFLARE_R2_PUBLIC_URL=https://<public-media-domain>`
+- `DJANGO_EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend`
+- `DJANGO_EMAIL_HOST=smtp.zoho.com`
+- `DJANGO_EMAIL_PORT=587`
+- `DJANGO_EMAIL_HOST_USER=hi@ramrocsit.com`
+- `DJANGO_EMAIL_HOST_PASSWORD=<zoho-mail-password-or-app-password>`
+- `DJANGO_EMAIL_USE_TLS=True`
+- `DJANGO_DEFAULT_FROM_EMAIL=hi@ramrocsit.com`
+- `CONTACT_EMAIL_RECIPIENT=hi@ramrocsit.com`
+- `CONTACT_EMAIL_FROM=hi@ramrocsit.com`
 
 When R2 media is enabled, every Django `FileField` and `ImageField` uses the
 R2 bucket through the default storage backend. PDFs and other files are stored
@@ -162,15 +173,13 @@ as-is. Image uploads are normalized and compressed before storage according to
 - `DJANGO_SESSION_COOKIE_SECURE=True`
 - `DJANGO_CSRF_COOKIE_SECURE=True`
 - `DJANGO_SECURE_HSTS_SECONDS=31536000`
-- `DJANGO_EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend`
 - `DJANGO_MEDIA_IMAGE_FORMAT=WEBP`
 - `DJANGO_MEDIA_IMAGE_QUALITY=82`
 - `DJANGO_MEDIA_WEBP_METHOD=6`
 
 Use `DJANGO_MEDIA_IMAGE_FORMAT=AVIF` only if the production Pillow build
 supports AVIF encoding. If AVIF encoding fails at runtime, uploads fall back to
-WEBP. Use `DJANGO_MEDIA_IMAGE_FORMAT=ORIGINAL` only when image conversion needs
-to be temporarily disabled.
+WEBP.
 
 ## Security Considerations
 
