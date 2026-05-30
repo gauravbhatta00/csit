@@ -86,6 +86,26 @@ class SyllabusSection(models.Model):
         return f"{self.syllabus.subject.name} - {self.title}"
 
 
+class CreditPerson(models.Model):
+    name = models.CharField(max_length=120)
+    designation = models.CharField(max_length=160, blank=True)
+    link_url = models.URLField(blank=True)
+    image = models.ImageField(upload_to='notes/credits/', blank=True, null=True)
+    image_url = models.URLField(blank=True)
+    portfolio_url = models.URLField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name', 'designation']
+        indexes = [
+            models.Index(fields=['name'], name='credit_person_name_idx'),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
 class Note(models.Model):
     subject = models.ForeignKey(Subject, on_delete=models.CASCADE, related_name='notes')
     unit = models.ForeignKey(
@@ -99,6 +119,13 @@ class Note(models.Model):
     slug = models.SlugField(blank=True)
     body = models.TextField(blank=True)
     pdf_file = models.FileField(upload_to='notes/', blank=True, null=True)
+    credit_person = models.ForeignKey(
+        CreditPerson,
+        on_delete=models.SET_NULL,
+        related_name='notes',
+        blank=True,
+        null=True,
+    )
     credit_name = models.CharField(max_length=120, blank=True)
     credit_designation = models.CharField(max_length=160, blank=True)
     credit_url = models.URLField(blank=True)
@@ -111,6 +138,9 @@ class Note(models.Model):
     class Meta:
         ordering = ['unit__order', 'order', 'title']
         unique_together = ('subject', 'slug')
+        indexes = [
+            models.Index(fields=['subject', 'is_published', 'unit', 'order'], name='note_sub_pub_unit_ord_idx'),
+        ]
 
     def save(self, *args, **kwargs):
         if not self.slug:
@@ -177,6 +207,9 @@ class Question(models.Model):
 
     class Meta:
         ordering = ['section__order', 'order', 'id']
+        indexes = [
+            models.Index(fields=['year', 'section', 'order'], name='question_year_sec_ord_idx'),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=['source_question_id'],
@@ -236,6 +269,9 @@ class AnswerContribution(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['question', 'status', 'is_main_answer'], name='ans_contrib_q_status_idx'),
+        ]
 
     def __str__(self):
         return f"{self.user.username} - {self.question_id} - {self.status}"
@@ -290,6 +326,9 @@ class MockTestResult(models.Model):
 
     class Meta:
         ordering = ['-completed_at']
+        indexes = [
+            models.Index(fields=['user', 'completed_at'], name='mock_result_user_time_idx'),
+        ]
 
     def __str__(self):
         return f"{self.user.username} - {self.mock_test.title} - {self.score}/{self.total_marks}"
@@ -326,6 +365,9 @@ class Discussion(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['subject', 'created_at'], name='discussion_subject_time_idx'),
+        ]
 
     def __str__(self):
         return self.title

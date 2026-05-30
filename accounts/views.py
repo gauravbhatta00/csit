@@ -28,6 +28,7 @@ from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from django.utils.text import slugify
 from academics.models import (
+    CreditPerson,
     Discussion,
     DiscussionReply,
     AnswerContribution,
@@ -45,6 +46,7 @@ from academics.models import (
     SyllabusUnit,
     Year,
 )
+from academics.serializers import CreditPersonSerializer
 from .models import (
     ContactMessage,
     ContributionSubmission,
@@ -205,6 +207,10 @@ def build_note_slug(subject, unit, title):
     if unit:
         return unit.slug
     return slugify(title) or f'note-{subject.notes.count() + 1}'
+
+
+def serialize_credit_person(credit_person, request=None):
+    return CreditPersonSerializer(credit_person, context={'request': request}).data
 
 
 def choose_subject_csv_rows(subject, rows):
@@ -1276,6 +1282,27 @@ class AdminSyllabusUnitDetailView(APIView):
         unit = get_object_or_404(SyllabusUnit, pk=pk)
         unit.delete()
         return Response(status=204)
+
+
+class AdminCreditPersonListView(APIView):
+    permission_classes = [IsAdminUser]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def get(self, request):
+        credit_people = CreditPerson.objects.all()
+        search = (request.query_params.get('search') or '').strip()
+        if search:
+            credit_people = credit_people.filter(name__icontains=search)
+        return Response([
+            serialize_credit_person(credit_person, request)
+            for credit_person in credit_people
+        ])
+
+    def post(self, request):
+        serializer = CreditPersonSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        credit_person = serializer.save()
+        return Response(serialize_credit_person(credit_person, request), status=201)
 
 
 class AdminSubjectNoteListView(APIView):

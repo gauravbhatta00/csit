@@ -4,6 +4,7 @@ from .models import (
     Subject,
     Syllabus,
     Note,
+    CreditPerson,
     Year,
     Discussion,
     DiscussionReply,
@@ -109,12 +110,28 @@ class SubjectListSerializer(serializers.ModelSerializer):
         ]
 
 
+class CreditPersonSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CreditPerson
+        fields = [
+            'id',
+            'name',
+            'designation',
+            'link_url',
+            'image',
+            'image_url',
+            'portfolio_url',
+        ]
+
+
 class NoteSerializer(serializers.ModelSerializer):
     unit_slug = serializers.CharField(source='unit.slug', read_only=True)
     unit_title = serializers.CharField(source='unit.title', read_only=True)
     unit_order = serializers.IntegerField(source='unit.order', read_only=True)
     unit_duration = serializers.CharField(source='unit.duration', read_only=True)
     unit_content = serializers.CharField(source='unit.content', read_only=True)
+    credit_person = CreditPersonSerializer(read_only=True)
+    credit = serializers.SerializerMethodField()
 
     class Meta:
         model = Note
@@ -130,6 +147,8 @@ class NoteSerializer(serializers.ModelSerializer):
             'unit_order',
             'unit_duration',
             'unit_content',
+            'credit_person',
+            'credit',
             'credit_name',
             'credit_designation',
             'credit_url',
@@ -137,6 +156,30 @@ class NoteSerializer(serializers.ModelSerializer):
             'order',
             'updated_at',
         ]
+
+    def get_credit(self, obj):
+        if obj.credit_person_id:
+            return CreditPersonSerializer(obj.credit_person, context=self.context).data
+
+        if not any([obj.credit_name, obj.credit_designation, obj.credit_url, obj.credit_image]):
+            return None
+
+        image_url = None
+        if obj.credit_image:
+            try:
+                image_url = obj.credit_image.url
+            except ValueError:
+                image_url = None
+
+        return {
+            'id': None,
+            'name': obj.credit_name,
+            'designation': obj.credit_designation,
+            'link_url': obj.credit_url,
+            'image': image_url,
+            'image_url': '',
+            'portfolio_url': '',
+        }
 
 
 class SemesterSerializer(serializers.ModelSerializer):
