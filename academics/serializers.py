@@ -1,4 +1,6 @@
 from rest_framework import serializers
+
+from .media_urls import safe_media_url
 from .models import (
     Semester,
     Subject,
@@ -35,6 +37,7 @@ class SyllabusSectionSerializer(serializers.ModelSerializer):
 class SyllabusSerializer(serializers.ModelSerializer):
     units = SyllabusUnitSerializer(many=True, read_only=True)
     sections = SyllabusSectionSerializer(many=True, read_only=True)
+    pdf_file = serializers.SerializerMethodField()
 
     class Meta:
         model = Syllabus
@@ -58,11 +61,19 @@ class SyllabusSerializer(serializers.ModelSerializer):
             'updated_at',
         ]
 
+    def get_pdf_file(self, obj):
+        return safe_media_url(obj.pdf_file)
+
 
 class SyllabusSummarySerializer(serializers.ModelSerializer):
+    pdf_file = serializers.SerializerMethodField()
+
     class Meta:
         model = Syllabus
         fields = ['id', 'pdf_file', 'course_title', 'course_no', 'updated_at']
+
+    def get_pdf_file(self, obj):
+        return safe_media_url(obj.pdf_file)
 
 
 class SubjectSerializer(serializers.ModelSerializer):
@@ -110,6 +121,8 @@ class SubjectListSerializer(serializers.ModelSerializer):
 
 
 class NoteSerializer(serializers.ModelSerializer):
+    pdf_file = serializers.SerializerMethodField()
+    credit_image = serializers.SerializerMethodField()
     unit_slug = serializers.CharField(source='unit.slug', read_only=True)
     unit_title = serializers.CharField(source='unit.title', read_only=True)
     unit_order = serializers.IntegerField(source='unit.order', read_only=True)
@@ -137,6 +150,12 @@ class NoteSerializer(serializers.ModelSerializer):
             'order',
             'updated_at',
         ]
+
+    def get_pdf_file(self, obj):
+        return safe_media_url(obj.pdf_file)
+
+    def get_credit_image(self, obj):
+        return safe_media_url(obj.credit_image)
 
 
 class SemesterSerializer(serializers.ModelSerializer):
@@ -231,23 +250,37 @@ class QuestionSerializer(serializers.ModelSerializer):
 
 class ApprovedAnswerContributionSerializer(serializers.ModelSerializer):
     username = serializers.CharField(source='user.username', read_only=True)
+    image = serializers.SerializerMethodField()
 
     class Meta:
         model = AnswerContribution
         fields = ['id', 'username', 'answer_text', 'image', 'created_at']
 
+    def get_image(self, obj):
+        return safe_media_url(obj.image, missing_value='')
+
 
 class AnswerContributionSerializer(serializers.ModelSerializer):
     username = serializers.CharField(source='user.username', read_only=True)
+    image = serializers.SerializerMethodField()
 
     class Meta:
         model = AnswerContribution
         fields = ['id', 'username', 'answer_text', 'image', 'status', 'created_at']
 
+    def get_image(self, obj):
+        return safe_media_url(obj.image, missing_value='')
+
+
 class QuestionPaperSerializer(serializers.ModelSerializer):
+    pdf_file = serializers.SerializerMethodField()
+
     class Meta:
         model = QuestionPaper
         fields = ['id', 'pdf_file']
+
+    def get_pdf_file(self, obj):
+        return safe_media_url(obj.pdf_file)
 
 
 class DiscussionReplySerializer(serializers.ModelSerializer):

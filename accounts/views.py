@@ -27,6 +27,7 @@ from django.utils.dateparse import parse_datetime
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from django.utils.text import slugify
+from academics.media_urls import safe_media_url
 from academics.models import (
     Discussion,
     DiscussionReply,
@@ -1061,7 +1062,7 @@ class AdminSubjectSyllabusView(APIView):
         return {
             'id': syllabus.id,
             'subject_id': syllabus.subject_id,
-            'pdf_file': syllabus.pdf_file.url if syllabus.pdf_file else None,
+            'pdf_file': safe_media_url(syllabus.pdf_file),
             'course_title': syllabus.course_title,
             'course_no': syllabus.course_no,
             'semester_label': syllabus.semester_label,
@@ -1289,7 +1290,7 @@ class AdminSubjectNoteListView(APIView):
             'title': note.title,
             'slug': note.slug,
             'body': note.body,
-            'pdf_file': note.pdf_file.url if note.pdf_file else None,
+            'pdf_file': safe_media_url(note.pdf_file),
             'unit': note.unit_id,
             'unit_slug': note.unit.slug if note.unit else '',
             'unit_title': note.unit.title if note.unit else '',
@@ -1298,7 +1299,7 @@ class AdminSubjectNoteListView(APIView):
             'credit_name': note.credit_name,
             'credit_designation': note.credit_designation,
             'credit_url': note.credit_url,
-            'credit_image': note.credit_image.url if note.credit_image else None,
+            'credit_image': safe_media_url(note.credit_image),
             'order': note.order,
             'is_published': note.is_published,
             'updated_at': note.updated_at,
@@ -1459,7 +1460,7 @@ class AdminNoteDetailView(APIView):
             'title': note.title,
             'slug': note.slug,
             'body': note.body,
-            'pdf_file': note.pdf_file.url if note.pdf_file else None,
+            'pdf_file': safe_media_url(note.pdf_file),
             'unit': note.unit_id,
             'unit_slug': note.unit.slug if note.unit else '',
             'unit_title': note.unit.title if note.unit else '',
@@ -1468,7 +1469,7 @@ class AdminNoteDetailView(APIView):
             'credit_name': note.credit_name,
             'credit_designation': note.credit_designation,
             'credit_url': note.credit_url,
-            'credit_image': note.credit_image.url if note.credit_image else None,
+            'credit_image': safe_media_url(note.credit_image),
             'order': note.order,
             'is_published': note.is_published,
             'updated_at': note.updated_at,
@@ -2028,7 +2029,7 @@ class AdminAnswerContributionListView(APIView):
             'year': contribution.question.year.year,
             'username': contribution.user.username,
             'answer_text': contribution.answer_text,
-            'image': contribution.image.url if contribution.image else '',
+            'image': safe_media_url(contribution.image, missing_value=''),
             'status': contribution.status,
             'is_main_answer': contribution.is_main_answer,
             'rejection_reason': contribution.rejection_reason,
