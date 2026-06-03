@@ -13,7 +13,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import AccessToken
 
-from academics.models import AnswerContribution, MockTest, Note, Question, Semester, Subject, Syllabus, SyllabusSection, SyllabusUnit, Year
+from academics.models import AnswerContribution, CreditPerson, MockTest, Note, Question, Semester, Subject, Syllabus, SyllabusSection, SyllabusUnit, Year
 from .models import (
     ContactMessage,
     ContributionSubmission,
@@ -525,6 +525,45 @@ class AuthApiTests(APITestCase):
         self.assertEqual(note.title, 'Algorithm notes')
         self.assertEqual(note.credit_name, 'Jane Doe')
         self.assertEqual(note.credit_designation, 'CSIT Lecturer')
+
+    def test_staff_user_can_create_credit_person(self):
+        staff = User.objects.create_user(
+            username='credit-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        self.client.force_authenticate(user=staff)
+
+        response = self.client.post(
+            '/api/accounts/admin/credit-people/',
+            {
+                'name': 'Jane Contributor',
+                'designation': 'Lecturer',
+                'link_url': 'https://example.com/profile',
+                'portfolio_url': 'https://example.com/portfolio',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['name'], 'Jane Contributor')
+        self.assertEqual(response.data['designation'], 'Lecturer')
+        self.assertTrue(CreditPerson.objects.filter(name='Jane Contributor').exists())
+
+    def test_staff_user_can_list_credit_people(self):
+        staff = User.objects.create_user(
+            username='credit-list-admin',
+            password='pass12345',
+            is_staff=True,
+        )
+        self.client.force_authenticate(user=staff)
+        CreditPerson.objects.create(name='Jane Contributor', designation='Lecturer')
+
+        response = self.client.get('/api/accounts/admin/credit-people/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data[0]['name'], 'Jane Contributor')
+        self.assertEqual(response.data[0]['designation'], 'Lecturer')
 
     def test_staff_user_can_bulk_import_questions_from_csv(self):
         staff = User.objects.create_user(

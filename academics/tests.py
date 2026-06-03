@@ -6,6 +6,7 @@ from rest_framework.test import APITestCase
 from accounts.models import Notification
 from .models import (
     Discussion,
+    CreditPerson,
     AnswerContribution,
     MockTest,
     MockTestAnswer,
@@ -49,10 +50,10 @@ class AcademicApiTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data[0]['question_text'], 'Define mean.')
-        self.assertEqual(response.data[0]['answer_text'], '')
-        self.assertEqual(response.data[0]['answer_source_url'], '')
-        self.assertEqual(response.data[0]['answer_image_paths'], '')
+        self.assertEqual(response.data['results'][0]['question_text'], 'Define mean.')
+        self.assertEqual(response.data['results'][0]['answer_text'], '')
+        self.assertEqual(response.data['results'][0]['answer_source_url'], '')
+        self.assertEqual(response.data['results'][0]['answer_image_paths'], '')
 
     def test_question_answers_are_visible_when_logged_in(self):
         user = User.objects.create_user(username='answer-reader', password='pass12345')
@@ -71,9 +72,9 @@ class AcademicApiTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data[0]['answer_text'], 'Mean is the arithmetic average.')
-        self.assertEqual(response.data[0]['answer_source_url'], 'https://example.com/answer')
-        self.assertEqual(response.data[0]['answer_image_paths'], 'images/mean.webp')
+        self.assertEqual(response.data['results'][0]['answer_text'], 'Mean is the arithmetic average.')
+        self.assertEqual(response.data['results'][0]['answer_source_url'], 'https://example.com/answer')
+        self.assertEqual(response.data['results'][0]['answer_image_paths'], 'images/mean.webp')
 
     def test_only_approved_contributions_are_visible_with_questions(self):
         contributor = User.objects.create_user(username='helper', password='pass12345')
@@ -108,9 +109,9 @@ class AcademicApiTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data[0]['approved_contributions']), 1)
+        self.assertEqual(len(response.data['results'][0]['approved_contributions']), 1)
         self.assertEqual(
-            response.data[0]['approved_contributions'][0]['id'],
+            response.data['results'][0]['approved_contributions'][0]['id'],
             approved.id,
         )
 
@@ -202,7 +203,7 @@ class AcademicApiTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data[0]['question_text'], 'Define mode.')
+        self.assertEqual(response.data['results'][0]['question_text'], 'Define mode.')
 
     def test_semester_subjects_can_be_loaded_by_semester_id(self):
         response = self.client.get(f'/api/semesters/{self.semester.id}/subjects/')
@@ -276,9 +277,33 @@ class AcademicApiTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(response.data[0]['title'], 'Probability basics')
-        self.assertEqual(response.data[0]['unit_slug'], 'unit-1')
+        self.assertEqual(len(response.data['results']), 1)
+        self.assertEqual(response.data['results'][0]['title'], 'Probability basics')
+        self.assertEqual(response.data['results'][0]['unit_slug'], 'unit-1')
+
+    def test_subject_notes_include_reusable_credit_person(self):
+        credit_person = CreditPerson.objects.create(
+            name='Jane Contributor',
+            designation='Lecturer',
+            link_url='https://example.com/profile',
+            image_url='https://example.com/photo.jpg',
+            portfolio_url='https://example.com/portfolio',
+        )
+        Note.objects.create(
+            subject=self.subject,
+            title='Credited note',
+            slug='credited-note',
+            body='Notes with reusable credit.',
+            credit_person=credit_person,
+        )
+
+        response = self.client.get(f'/api/subjects/{self.subject.slug}/notes/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        note = response.data['results'][0]
+        self.assertEqual(note['credit_person']['name'], 'Jane Contributor')
+        self.assertEqual(note['credit']['designation'], 'Lecturer')
+        self.assertEqual(note['credit']['portfolio_url'], 'https://example.com/portfolio')
 
     def test_mock_test_submit_scores_and_stores_answer_review(self):
         user = User.objects.create_user(username='tester', password='pass12345')

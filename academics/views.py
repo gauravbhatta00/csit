@@ -40,6 +40,7 @@ from .serializers import (
 )
 from accounts.permissions import IsSingleDeviceAuthenticated
 from .utils import notify_reply
+from .pagination import SmallResultsSetPagination, TinyResultsSetPagination
 
 
 def build_slug_or_id_query(value, slug_field='slug', id_field='id'):
@@ -144,13 +145,14 @@ class SubjectYearListView(ListAPIView):
 class SubjectNoteListView(ListAPIView):
     permission_classes = [AllowAny]
     serializer_class = NoteSerializer
+    pagination_class = SmallResultsSetPagination
 
     def get_queryset(self):
         subject = get_subject_by_slug_or_id(self.kwargs['subject_slug'])
         queryset = Note.objects.filter(
             subject=subject,
             is_published=True,
-        ).select_related('unit')
+        ).select_related('unit', 'credit_person')
         unit_slug = (self.request.query_params.get('unit') or '').strip()
         if unit_slug:
             queryset = queryset.filter(unit__slug=unit_slug)
@@ -164,7 +166,7 @@ class SubjectNoteDetailView(RetrieveAPIView):
     def get_object(self):
         subject = get_subject_by_slug_or_id(self.kwargs['subject_slug'])
         return get_object_or_404(
-            Note.objects.select_related('unit'),
+            Note.objects.select_related('unit', 'credit_person'),
             subject=subject,
             slug=self.kwargs['note_slug'],
             is_published=True,
@@ -174,6 +176,7 @@ class SubjectNoteDetailView(RetrieveAPIView):
 class YearQuestionListView(ListAPIView):
     permission_classes = [AllowAny]
     serializer_class = QuestionSerializer
+    pagination_class = SmallResultsSetPagination
 
     def get_queryset(self):
         subject = get_subject_by_slug_or_id(self.kwargs['subject_slug'])
@@ -259,6 +262,7 @@ class QuestionContributionListView(APIView):
 class SubjectMockTestListView(ListAPIView):
     permission_classes = [AllowAny]
     serializer_class = MockTestListSerializer
+    pagination_class = TinyResultsSetPagination
 
     def get_queryset(self):
         subject = get_subject_by_slug_or_id(self.kwargs['subject_slug'])
@@ -347,9 +351,10 @@ class SubmitMockTestView(APIView):
 class UserMockTestResultListView(ListAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = MockTestResultSerializer
+    pagination_class = SmallResultsSetPagination
 
     def get_queryset(self):
-        return MockTestResult.objects.filter(user=self.request.user)
+        return MockTestResult.objects.filter(user=self.request.user).select_related('mock_test')
 
 
 class MockTestResultDetailView(APIView):
@@ -383,13 +388,20 @@ class MockTestResultDetailView(APIView):
 
 class SubjectDiscussionListView(APIView):
     permission_classes = [IsAuthenticated]
+    pagination_class = SmallResultsSetPagination
 
     def get(self, request, subject_slug):
         subject = get_subject_by_slug_or_id(subject_slug)
 
-        discussions = Discussion.objects.filter(subject=subject).select_related('user')
-        serializer = DiscussionSerializer(discussions, many=True)
-        return Response(serializer.data)
+        discussions = (
+            Discussion.objects.filter(subject=subject)
+            .select_related('user')
+            .prefetch_related('replies__user', 'replies__child_replies__user')
+        )
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(discussions, request, view=self)
+        serializer = DiscussionSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
 
     def post(self, request, subject_slug):
         subject = get_subject_by_slug_or_id(subject_slug)
@@ -427,7 +439,11 @@ class DiscussionDetailView(APIView):
 
     def get(self, request, pk):
         try:
-            discussion = Discussion.objects.get(id=pk)
+            discussion = (
+                Discussion.objects.select_related('user', 'subject')
+                .prefetch_related('replies__user', 'replies__child_replies__user')
+                .get(id=pk)
+            )
         except Discussion.DoesNotExist:
             return Response({'detail': 'Discussion not found.'}, status=404)
 
@@ -510,10 +526,16 @@ class SearchView(APIView):
         if not query:
             return Response({'detail': 'Search query required.'}, status=400)
 
-        subjects = Subject.objects.filter(name__icontains=query).select_related('semester')
+        try:
+            limit = int(request.query_params.get('limit', 10))
+        except (TypeError, ValueError):
+            limit = 10
+        limit = max(1, min(limit, 20))
+
+        subjects = Subject.objects.filter(name__icontains=query).select_related('semester')[:limit]
         questions = Question.objects.filter(
             question_text__icontains=query,
-        ).select_related('year__subject')
+        ).select_related('year__subject', 'year__subject__semester')[:limit]
 
         return Response({
             'subjects': [

@@ -6,6 +6,7 @@ from .models import (
     MockTestQuestion,
     MockTestResult,
     Note,
+    CreditPerson,
     AnswerContribution,
     Semester,
     Subject,
@@ -92,13 +93,59 @@ class SyllabusSectionAdmin(admin.ModelAdmin):
     ordering = ['syllabus', 'order']
 
 
+@admin.register(CreditPerson)
+class CreditPersonAdmin(admin.ModelAdmin):
+    list_display = ['name', 'designation', 'link_url', 'portfolio_url', 'image', 'image_url', 'updated_at']
+    search_fields = ['name', 'designation', 'link_url', 'portfolio_url']
+    ordering = ['name', 'designation']
+    fields = ['name', 'designation', 'link_url', 'portfolio_url', 'image', 'image_url']
+
+
 @admin.register(Note)
 class NoteAdmin(admin.ModelAdmin):
-    list_display = ['title', 'subject', 'unit', 'pdf_file', 'credit_name', 'credit_designation', 'is_published', 'order', 'updated_at']
-    list_filter = ['is_published', 'subject__semester', 'subject']
+    list_display = [
+        'title',
+        'subject',
+        'unit',
+        'pdf_file',
+        'credit_person',
+        'credit_name',
+        'credit_designation',
+        'is_published',
+        'order',
+        'updated_at',
+    ]
+    list_filter = ['is_published', 'subject__semester', 'subject', 'credit_person']
+    autocomplete_fields = ['credit_person']
     prepopulated_fields = {'slug': ('title',)}
-    search_fields = ['title', 'body', 'subject__name', 'credit_name', 'credit_designation']
+    search_fields = [
+        'title',
+        'body',
+        'subject__name',
+        'credit_person__name',
+        'credit_person__designation',
+        'credit_name',
+        'credit_designation',
+    ]
+    fieldsets = (
+        (None, {
+            'fields': ('subject', 'unit', 'title', 'slug', 'body', 'pdf_file', 'order', 'is_published')
+        }),
+        ('Credit', {
+            'fields': (
+                'credit_person',
+                'credit_name',
+                'credit_designation',
+                'credit_url',
+                'credit_image',
+            ),
+            'description': 'Use Credit person for reusable credits. The older credit fields remain for existing notes and fallback display.',
+        }),
+    )
     ordering = ['subject', 'unit__order', 'order', 'title']
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related('subject', 'unit', 'credit_person')
 
 
 class QuestionSectionInline(admin.TabularInline):
