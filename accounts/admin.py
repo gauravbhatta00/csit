@@ -4,6 +4,7 @@ from .models import (
     ContactMessage,
     ContributionSubmission,
     CustomUser,
+    DeviceToken,
     EmailSubscription,
     Notification,
     Testimonial,
@@ -92,3 +93,14 @@ class NotificationAdmin(admin.ModelAdmin):
     list_filter = ['type', 'is_read']
     search_fields = ['user__username', 'user__email', 'message']
     date_hierarchy = 'created_at'
+
+
+@admin.register(DeviceToken)
+class DeviceTokenAdmin(admin.ModelAdmin):
+    list_display = ['user', 'platform', 'device_name', 'is_active', 'updated_at']
+    list_filter = ['platform', 'is_active', 'created_at', 'updated_at']
+    search_fields = ['user__username', 'user__email', 'token', 'device_name']
+    list_editable = ['is_active']
+    readonly_fields = ['created_at', 'updated_at']
+    autocomplete_fields = ['user']
+    date_hierarchy = 'updated_at'
