@@ -17,6 +17,7 @@ from academics.models import AnswerContribution, CreditPerson, MockTest, Note, Q
 from .models import (
     ContactMessage,
     ContributionSubmission,
+    DeviceToken,
     EmailSubscription,
     Notification,
     Testimonial,
@@ -1329,3 +1330,103 @@ class AuthApiTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class AccountManagementApiTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="account-user",
+            email="account.com",
+            password="oldpass12345",
+        )
+
+    def test_user_can_change_password_with_current_password(self):
+        self.user.active_token = "active-token"
+        self.user.save(update_fields=["active_token"])
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            "/api/accounts/password/change/",
+            {"current_password": "oldpass12345", "new_password": "newpass12345"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("newpass12345"))
+        self.assertIsNone(self.user.active_token)
+
+    def test_google_only_user_can_set_first_password_without_current_password(self):
+        self.user.set_unusable_password()
+        self.user.save(update_fields=["password"])
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            "/api/accounts/password/change/",
+            {"new_password": "newpass12345"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("newpass12345"))
+
+    def test_password_reset_sets_password_for_google_only_user(self):
+        self.user.set_unusable_password()
+        self.user.save(update_fields=["password"])
+        uid = urlsafe_base64_encode(force_bytes(self.user.pk))
+        token = default_token_generator.make_token(self.user)
+
+        response = self.client.post(
+            "/api/accounts/password-reset/confirm/",
+            {"uid": uid, "token": token, "password": "newpass12345"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("newpass12345"))
+
+    def test_password_user_can_delete_own_account_with_password(self):
+        user_id = self.user.id
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.delete(
+            "/api/accounts/account/",
+            {"password": "oldpass12345"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(User.objects.filter(id=user_id).exists())
+
+    def test_google_only_user_can_delete_own_account(self):
+        user_id = self.user.id
+        self.user.set_unusable_password()
+        self.user.save(update_fields=["password"])
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.delete("/api/accounts/account/", format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(User.objects.filter(id=user_id).exists())
+
+    def test_user_can_register_and_revoke_device_token(self):
+        self.client.force_authenticate(user=self.user)
+
+        create_response = self.client.post(
+            "/api/accounts/device-tokens/",
+            {"token": "notification-device-token", "platform": "android", "device_name": "Pixel"},
+            format="json",
+        )
+        delete_response = self.client.delete(
+            "/api/accounts/device-tokens/",
+            {"token": "notification-device-token"},
+            format="json",
+        )
+
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
+        device_token = DeviceToken.objects.get(token="notification-device-token")
+        self.assertEqual(device_token.user, self.user)
+        self.assertFalse(device_token.is_active)

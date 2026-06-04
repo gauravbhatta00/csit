@@ -267,3 +267,21 @@ class Notification(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.type} - {self.message[:50]}"
+
+
+class DeviceToken(models.Model):
+    PLATFORM_CHOICES = [("android", "Android"), ("ios", "iOS"), ("web", "Web")]
+
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name="device_tokens")
+    token = models.CharField(max_length=512, unique=True)
+    platform = models.CharField(max_length=20, choices=PLATFORM_CHOICES)
+    device_name = models.CharField(max_length=120, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"{self.user.username} - {self.platform} - {self.device_name or self.token[:20]}"

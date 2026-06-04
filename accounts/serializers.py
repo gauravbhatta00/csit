@@ -1,4 +1,5 @@
 from djoser.serializers import UserCreateSerializer
+from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.serializers import (
@@ -11,6 +12,7 @@ from .models import (
     ContactMessage,
     ContributionSubmission,
     CustomUser,
+    DeviceToken,
     EmailSubscription,
     Notification,
     Testimonial,
@@ -278,7 +280,53 @@ class PasswordResetRequestSerializer(serializers.Serializer):
 class PasswordResetConfirmSerializer(serializers.Serializer):
     uid = serializers.CharField()
     token = serializers.CharField()
-    password = serializers.CharField(min_length=8, write_only=True)
+    password = serializers.CharField(write_only=True)
+
+    def validate_password(self, value):
+        validate_password(value)
+        return value
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    current_password = serializers.CharField(write_only=True, required=False)
+    new_password = serializers.CharField(write_only=True)
+
+    def validate_new_password(self, value):
+        validate_password(value, self.context["request"].user)
+        return value
+
+    def validate(self, attrs):
+        user = self.context["request"].user
+        if user.has_usable_password():
+            current_password = attrs.get("current_password")
+            if not current_password or not user.check_password(current_password):
+                raise serializers.ValidationError({"current_password": "Current password is incorrect."})
+        return attrs
+
+
+class DeleteAccountSerializer(serializers.Serializer):
+    password = serializers.CharField(write_only=True, required=False)
+
+    def validate(self, attrs):
+        user = self.context["request"].user
+        if user.has_usable_password():
+            password = attrs.get("password")
+            if not password or not user.check_password(password):
+                raise serializers.ValidationError({"password": "Password is required and must be correct."})
+        return attrs
+
+
+class DeviceTokenSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DeviceToken
+        fields = ["id", "token", "platform", "device_name", "is_active", "created_at", "updated_at"]
+        read_only_fields = ["id", "is_active", "created_at", "updated_at"]
+
+    def validate_token(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Device token is required.")
+        return value
 
 
 class GoogleLoginSerializer(serializers.Serializer):
