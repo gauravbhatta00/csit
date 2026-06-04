@@ -51,6 +51,7 @@ from academics.serializers import CreditPersonSerializer
 from .models import (
     ContactMessage,
     ContributionSubmission,
+    DeviceToken,
     EmailSubscription,
     Notification,
     Testimonial,
@@ -58,6 +59,9 @@ from .models import (
 from .serializers import (
     ContactMessageSerializer,
     ContributionSubmissionSerializer,
+    ChangePasswordSerializer,
+    DeleteAccountSerializer,
+    DeviceTokenSerializer,
     EmailSubscriptionSerializer,
     GoogleLoginSerializer,
     NotificationSerializer,
@@ -290,6 +294,56 @@ class ProfileView(APIView):
         return Response(
             ProfileSerializer(request.user, context={'request': request}).data
         )
+
+
+class ChangePasswordView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = ChangePasswordSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        request.user.set_password(serializer.validated_data["new_password"])
+        request.user.active_token = None
+        request.user.save(update_fields=["password", "active_token"])
+        return Response({"detail": "Password has been changed. Please log in again."})
+
+
+class DeleteAccountView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request):
+        serializer = DeleteAccountSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        request.user.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class DeviceTokenView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        tokens = DeviceToken.objects.filter(user=request.user, is_active=True)
+        return Response(DeviceTokenSerializer(tokens, many=True).data)
+
+    def post(self, request):
+        serializer = DeviceTokenSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        device_token, created = DeviceToken.objects.update_or_create(
+            token=data["token"],
+            defaults={"user": request.user, "platform": data["platform"], "device_name": data.get("device_name", ""), "is_active": True},
+        )
+        response_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return Response(DeviceTokenSerializer(device_token).data, status=response_status)
+
+    def delete(self, request):
+        token = str(request.data.get("token", "")).strip()
+        if not token:
+            return Response({"token": ["Device token is required."]}, status=status.HTTP_400_BAD_REQUEST)
+        updated = DeviceToken.objects.filter(user=request.user, token=token, is_active=True).update(is_active=False)
+        if not updated:
+            return Response({"detail": "Device token not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class TestimonialListCreateView(APIView):
