@@ -170,6 +170,12 @@ class NoteSerializer(serializers.ModelSerializer):
             'updated_at',
         ]
 
+    def get_pdf_file(self, obj):
+        return safe_media_url(obj.pdf_file)
+
+    def get_credit_image(self, obj):
+        return safe_media_url(obj.credit_image)
+
     def get_credit(self, obj):
         if obj.credit_person_id:
             return CreditPersonSerializer(obj.credit_person, context=self.context).data
@@ -177,19 +183,12 @@ class NoteSerializer(serializers.ModelSerializer):
         if not any([obj.credit_name, obj.credit_designation, obj.credit_url, obj.credit_image]):
             return None
 
-        image_url = None
-        if obj.credit_image:
-            try:
-                image_url = obj.credit_image.url
-            except ValueError:
-                image_url = None
-
         return {
             'id': None,
             'name': obj.credit_name,
             'designation': obj.credit_designation,
             'link_url': obj.credit_url,
-            'image': image_url,
+            'image': self.get_credit_image(obj),
             'image_url': '',
             'portfolio_url': '',
         }

@@ -386,9 +386,9 @@ class PasswordResetRequestView(APIView):
                 f"?uid={uid}&token={token}"
             )
             send_mail(
-                subject='Reset your Sabaiko CSIT password',
+                subject='Reset your Ramro CSIT password',
                 message=(
-                    "Use this link to reset your Sabaiko CSIT password:\n\n"
+                    "Use this link to reset your Ramro CSIT password:\n\n"
                     f"{reset_url}\n\n"
                     "If you did not request this, you can ignore this email."
                 ),

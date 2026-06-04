@@ -1272,7 +1272,7 @@ class AuthApiTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(mail.outbox), 1)
-        self.assertIn('/reset-password?', mail.outbox[0].body)
+        self.assertIn('http://localhost:3000/reset-password?', mail.outbox[0].body)
 
     def test_password_reset_confirm_updates_password(self):
         uid = urlsafe_base64_encode(force_bytes(self.user.pk))
