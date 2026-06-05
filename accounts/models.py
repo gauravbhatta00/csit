@@ -1,4 +1,5 @@
 import math
+import uuid
 
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
@@ -174,6 +175,8 @@ class ContributionSubmission(models.Model):
 class EmailSubscription(models.Model):
     email = models.EmailField(unique=True)
     is_active = models.BooleanField(default=True)
+    unsubscribe_token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    source = models.CharField(max_length=40, default='manual')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -182,6 +185,67 @@ class EmailSubscription(models.Model):
 
     def __str__(self):
         return self.email
+
+
+class EmailTemplate(models.Model):
+    slug = models.SlugField(unique=True)
+    name = models.CharField(max_length=120)
+    subject = models.CharField(max_length=180)
+    preheader = models.CharField(max_length=220, blank=True)
+    body_html = models.TextField()
+    custom_css = models.TextField(blank=True)
+    is_system = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class EmailCampaign(models.Model):
+    RECIPIENT_ACTIVE_SUBSCRIBERS = 'active_subscribers'
+    RECIPIENT_ALL_USERS = 'all_users'
+
+    RECIPIENT_CHOICES = [
+        (RECIPIENT_ACTIVE_SUBSCRIBERS, 'Active subscribers'),
+        (RECIPIENT_ALL_USERS, 'All users with email'),
+    ]
+
+    template = models.ForeignKey(
+        EmailTemplate,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='campaigns',
+    )
+    subject = models.CharField(max_length=180)
+    preheader = models.CharField(max_length=220, blank=True)
+    body_html = models.TextField()
+    custom_css = models.TextField(blank=True)
+    recipient_filter = models.CharField(
+        max_length=40,
+        choices=RECIPIENT_CHOICES,
+        default=RECIPIENT_ACTIVE_SUBSCRIBERS,
+    )
+    sent_count = models.PositiveIntegerField(default=0)
+    failed_count = models.PositiveIntegerField(default=0)
+    sent_by = models.ForeignKey(
+        CustomUser,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='sent_email_campaigns',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.subject} ({self.sent_count} sent)"
 
 
 class Testimonial(models.Model):

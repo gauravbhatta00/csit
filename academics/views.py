@@ -6,6 +6,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from PIL import Image, UnidentifiedImageError
 from django.db.models import Count, Prefetch, Q
 from django.shortcuts import get_object_or_404
+from random import sample
 from .models import (
     Discussion,
     DiscussionReply,
@@ -13,6 +14,7 @@ from .models import (
     MockTest,
     MockTestAnswer,
     MockTestResult,
+    MockTestSession,
     Note,
     Semester,
     Subject,
@@ -28,6 +30,7 @@ from .serializers import (
     MockTestAnswerReviewSerializer,
     MockTestListSerializer,
     MockTestResultSerializer,
+    MockTestSessionSerializer,
     MockTestSerializer,
     PlatformDiscussionSerializer,
     SemesterListSerializer,
@@ -68,6 +71,27 @@ def parse_mock_test_question_ids(request_data):
             if value.strip()
         ]
     return {str(question_id) for question_id in selected_ids}
+
+
+def ordered_mock_questions(mock_test, question_ids):
+    ids = [int(question_id) for question_id in question_ids]
+    questions_by_id = {
+        question.id: question
+        for question in mock_test.questions.filter(id__in=ids)
+    }
+    return [
+        questions_by_id[question_id]
+        for question_id in ids
+        if question_id in questions_by_id
+    ]
+
+
+def parse_positive_int(value, default):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 class SemesterListView(ListAPIView):
@@ -280,6 +304,104 @@ class MockTestDetailView(RetrieveAPIView):
         return MockTest.objects.get(id=self.kwargs['pk'])
 
 
+class MockTestSessionStartView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        mock_test = get_object_or_404(
+            MockTest.objects.prefetch_related('questions'),
+            pk=pk,
+            is_active=True,
+        )
+        requested_question_count = request.data.get('question_count') or request.data.get('count')
+        question_count = parse_positive_int(requested_question_count, 10)
+        all_question_ids = list(mock_test.questions.values_list('id', flat=True))
+        if not all_question_ids:
+            return Response({'detail': 'This mock test has no questions.'}, status=400)
+
+        question_count = min(question_count, len(all_question_ids))
+        source_session = self.resolve_source_session(request, mock_test)
+        if source_session and requested_question_count in [None, '']:
+            question_count = source_session.question_count
+
+        if source_session:
+            question_count = min(question_count, len(source_session.question_ids))
+            question_ids = [
+                question_id
+                for question_id in source_session.question_ids
+                if question_id in all_question_ids
+            ][:question_count]
+        else:
+            question_ids = self.choose_fresh_question_ids(
+                request.user,
+                mock_test,
+                all_question_ids,
+                question_count,
+            )
+
+        session = MockTestSession.objects.create(
+            user=request.user,
+            mock_test=mock_test,
+            question_ids=question_ids,
+            question_count=len(question_ids),
+            source_session=source_session,
+        )
+        return Response(MockTestSessionSerializer(session).data, status=201)
+
+    def resolve_source_session(self, request, mock_test):
+        source_session_id = (
+            request.data.get('source_session_id')
+            or request.data.get('retake_session_id')
+            or request.data.get('session_id')
+        )
+        if source_session_id:
+            return get_object_or_404(
+                MockTestSession,
+                pk=source_session_id,
+                user=request.user,
+                mock_test=mock_test,
+            )
+
+        source_result_id = request.data.get('source_result_id') or request.data.get('retake_result_id')
+        if source_result_id:
+            result = get_object_or_404(
+                MockTestResult.objects.prefetch_related('answers'),
+                pk=source_result_id,
+                user=request.user,
+                mock_test=mock_test,
+            )
+            if result.session_id:
+                return result.session
+
+            question_ids = list(result.answers.order_by('id').values_list('question_id', flat=True))
+            if not question_ids:
+                return None
+            return MockTestSession.objects.create(
+                user=request.user,
+                mock_test=mock_test,
+                question_ids=question_ids,
+                question_count=len(question_ids),
+            )
+
+        return None
+
+    def choose_fresh_question_ids(self, user, mock_test, all_question_ids, question_count):
+        latest_session = (
+            MockTestSession.objects
+            .filter(user=user, mock_test=mock_test, question_count=question_count)
+            .order_by('-created_at')
+            .first()
+        )
+        excluded_ids = set(latest_session.question_ids if latest_session else [])
+        fresh_pool = [
+            question_id
+            for question_id in all_question_ids
+            if question_id not in excluded_ids
+        ]
+        pool = fresh_pool if len(fresh_pool) >= question_count else all_question_ids
+        return sample(pool, question_count)
+
+
 class SubmitMockTestView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -293,17 +415,32 @@ class SubmitMockTestView(APIView):
         if not isinstance(answers, dict):
             return Response({'detail': 'Answers must be an object.'}, status=400)
 
-        question_id_values = parse_mock_test_question_ids(request.data) or set(answers.keys())
-        try:
-            question_ids = {int(question_id) for question_id in question_id_values}
-        except (TypeError, ValueError):
-            return Response({'detail': 'Question IDs must be integers.'}, status=400)
+        session = None
+        session_id = request.data.get('session_id') or request.data.get('attempt_session_id')
+        if session_id:
+            session = get_object_or_404(
+                MockTestSession,
+                pk=session_id,
+                user=request.user,
+                mock_test=mock_test,
+            )
+            if hasattr(session, 'result'):
+                return Response({'detail': 'This mock test session was already submitted.'}, status=400)
+            question_ids_ordered = [int(question_id) for question_id in session.question_ids]
+            question_ids = set(question_ids_ordered)
+        else:
+            question_id_values = parse_mock_test_question_ids(request.data) or set(answers.keys())
+            try:
+                question_ids = {int(question_id) for question_id in question_id_values}
+            except (TypeError, ValueError):
+                return Response({'detail': 'Question IDs must be integers.'}, status=400)
+            question_ids_ordered = list(question_ids)
 
         score = 0
-        question_queryset = mock_test.questions.all()
         if question_ids:
-            question_queryset = question_queryset.filter(id__in=question_ids)
-        questions = list(question_queryset)
+            questions = ordered_mock_questions(mock_test, question_ids_ordered)
+        else:
+            questions = list(mock_test.questions.all())
 
         if question_ids and len(questions) != len(question_ids):
             return Response(
@@ -321,6 +458,7 @@ class SubmitMockTestView(APIView):
         result = MockTestResult.objects.create(
             user=request.user,
             mock_test=mock_test,
+            session=session,
             score=score,
             total_marks=total_marks,
         )
@@ -345,6 +483,7 @@ class SubmitMockTestView(APIView):
             'percentage': round((score / total_marks) * 100, 2)
             if total_marks else 0,
             'result_id': result.id,
+            'session_id': session.id if session else None,
         })
 
 
@@ -373,6 +512,7 @@ class MockTestResultDetailView(APIView):
             'result_id': result.id,
             'mock_test_id': result.mock_test.id,
             'mock_test_title': result.mock_test.title,
+            'session_id': result.session_id,
             'subject': result.mock_test.subject.name,
             'score': result.score,
             'total_marks': result.total_marks,

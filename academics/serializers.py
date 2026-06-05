@@ -14,6 +14,7 @@ from .models import (
     MockTestAnswer,
     MockTestQuestion,
     MockTestResult,
+    MockTestSession,
     Question,
     AnswerContribution,
     QuestionPaper,
@@ -402,6 +403,38 @@ class MockTestSerializer(serializers.ModelSerializer):
         ]
 
 
+class MockTestSessionSerializer(serializers.ModelSerializer):
+    questions = serializers.SerializerMethodField()
+    mock_test_title = serializers.CharField(source='mock_test.title', read_only=True)
+    duration_minutes = serializers.IntegerField(source='mock_test.duration_minutes', read_only=True)
+
+    class Meta:
+        model = MockTestSession
+        fields = [
+            'id',
+            'mock_test',
+            'mock_test_title',
+            'duration_minutes',
+            'question_count',
+            'question_ids',
+            'source_session',
+            'created_at',
+            'questions',
+        ]
+
+    def get_questions(self, session):
+        questions_by_id = {
+            question.id: question
+            for question in MockTestQuestion.objects.filter(id__in=session.question_ids)
+        }
+        ordered_questions = [
+            questions_by_id[question_id]
+            for question_id in session.question_ids
+            if question_id in questions_by_id
+        ]
+        return MockTestQuestionSerializer(ordered_questions, many=True).data
+
+
 class MockTestListSerializer(serializers.ModelSerializer):
     question_count = serializers.IntegerField(source='questions.count', read_only=True)
 
@@ -412,10 +445,11 @@ class MockTestListSerializer(serializers.ModelSerializer):
 
 class MockTestResultSerializer(serializers.ModelSerializer):
     mock_test_title = serializers.CharField(source='mock_test.title', read_only=True)
+    session = serializers.IntegerField(source='session_id', read_only=True)
 
     class Meta:
         model = MockTestResult
-        fields = ['id', 'mock_test', 'mock_test_title', 'score', 'total_marks', 'completed_at']
+        fields = ['id', 'mock_test', 'mock_test_title', 'session', 'score', 'total_marks', 'completed_at']
 
 
 class MockTestAnswerReviewSerializer(serializers.ModelSerializer):

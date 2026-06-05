@@ -18,7 +18,9 @@ from .models import (
     ContactMessage,
     ContributionSubmission,
     DeviceToken,
+    EmailCampaign,
     EmailSubscription,
+    EmailTemplate,
     Notification,
     Testimonial,
 )
@@ -69,6 +71,58 @@ class AuthApiTests(APITestCase):
         refreshed_access = AccessToken(refresh_response.data['access'])
         self.assertEqual(self.user.active_token, refreshed_access['jti'])
         self.assertNotEqual(self.user.active_token, original_jti)
+
+    @override_settings(
+        EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
+        FRONTEND_BASE_URL='http://localhost:3000',
+    )
+    def test_email_signup_requires_activation_and_subscribes_user(self):
+        response = self.client.post(
+            '/api/accounts/users/',
+            {
+                'username': 'newstudent',
+                'email': 'NewStudent@example.com',
+                'password': 'pass12345',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        user = User.objects.get(username='newstudent')
+        self.assertFalse(user.is_active)
+        self.assertEqual(user.email, 'newstudent@example.com')
+        subscription = EmailSubscription.objects.get(email='newstudent@example.com')
+        self.assertTrue(subscription.is_active)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn('Activate your Ramro CSIT account', mail.outbox[0].subject)
+        activation_html = mail.outbox[0].alternatives[0][0]
+        self.assertIn('http://localhost:3000/activate-account?', activation_html)
+        self.assertIn('/unsubscribe?', activation_html)
+
+        login_response = self.client.post(
+            '/api/accounts/jwt/create/',
+            {'username': 'newstudent', 'password': 'pass12345'},
+            format='json',
+        )
+        self.assertEqual(login_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        uid = urlsafe_base64_encode(force_bytes(user.pk))
+        token = default_token_generator.make_token(user)
+        activation_response = self.client.post(
+            '/api/accounts/activate/',
+            {'uid': uid, 'token': token},
+            format='json',
+        )
+        self.assertEqual(activation_response.status_code, status.HTTP_200_OK)
+        user.refresh_from_db()
+        self.assertTrue(user.is_active)
+
+        login_response = self.client.post(
+            '/api/accounts/jwt/create/',
+            {'username': 'newstudent', 'password': 'pass12345'},
+            format='json',
+        )
+        self.assertEqual(login_response.status_code, status.HTTP_200_OK)
 
     def test_suspended_user_login_returns_remaining_days_message(self):
         self.user.set_account_status(
@@ -1227,6 +1281,133 @@ class AuthApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(EmailSubscription.objects.count(), 1)
         self.assertTrue(EmailSubscription.objects.get().is_active)
+
+    def test_email_subscription_matches_existing_email_case_insensitively(self):
+        EmailSubscription.objects.create(
+            email='Student@Example.com',
+            is_active=False,
+        )
+
+        response = self.client.post(
+            '/api/accounts/email-subscriptions/',
+            {'email': 'student@example.com'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(EmailSubscription.objects.count(), 1)
+        subscription = EmailSubscription.objects.get()
+        self.assertEqual(subscription.email, 'student@example.com')
+        self.assertTrue(subscription.is_active)
+
+    def test_email_subscription_can_be_unsubscribed_by_token(self):
+        subscription = EmailSubscription.objects.create(email='student-news@example.com')
+
+        response = self.client.post(
+            '/api/accounts/email-subscriptions/unsubscribe/',
+            {'token': str(subscription.unsubscribe_token)},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        subscription.refresh_from_db()
+        self.assertFalse(subscription.is_active)
+
+    @override_settings(
+        EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
+        FRONTEND_BASE_URL='http://localhost:3000',
+    )
+    def test_staff_user_can_send_email_campaign_to_subscribers(self):
+        staff = User.objects.create_user(
+            username='email-admin',
+            email='email-admin@example.com',
+            password='pass12345',
+            is_staff=True,
+        )
+        EmailSubscription.objects.create(email='subscriber@example.com')
+        EmailSubscription.objects.create(email='paused@example.com', is_active=False)
+        template = EmailTemplate.objects.create(
+            slug='weekly-update',
+            name='Weekly update',
+            subject='Weekly CSIT update',
+            preheader='New materials are available.',
+            body_html='<h2>Hello</h2><p><a href="{{ frontend_url }}">Open resources</a></p>',
+            custom_css='.content h2 { color: #0f172a; }',
+        )
+        self.client.force_authenticate(user=staff)
+
+        response = self.client.post(
+            '/api/accounts/admin/email/campaigns/',
+            {
+                'recipient_filter': EmailCampaign.RECIPIENT_ACTIVE_SUBSCRIBERS,
+                'template_id': template.id,
+                'subject': 'Custom weekly update',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['sent_count'], 1)
+        self.assertEqual(response.data['failed_count'], 0)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ['subscriber@example.com'])
+        campaign_html = mail.outbox[0].alternatives[0][0]
+        self.assertIn('http://localhost:3000/unsubscribe?', campaign_html)
+        self.assertIn('http://localhost:3000', campaign_html)
+        campaign = EmailCampaign.objects.get()
+        self.assertEqual(campaign.sent_count, 1)
+        self.assertEqual(campaign.sent_by, staff)
+
+    @override_settings(
+        EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
+        FRONTEND_BASE_URL='http://localhost:3000',
+    )
+    def test_all_users_email_campaign_does_not_reactivate_unsubscribed_users(self):
+        staff = User.objects.create_user(
+            username='all-email-admin',
+            email='all-email-admin@example.com',
+            password='pass12345',
+            is_staff=True,
+        )
+        User.objects.create_user(
+            username='email-user',
+            email='email-user@example.com',
+            password='pass12345',
+        )
+        User.objects.create_user(
+            username='unsubscribed-user',
+            email='unsubscribed-user@example.com',
+            password='pass12345',
+        )
+        EmailSubscription.objects.create(
+            email='unsubscribed-user@example.com',
+            is_active=False,
+        )
+        self.client.force_authenticate(user=staff)
+
+        response = self.client.post(
+            '/api/accounts/admin/email/campaigns/',
+            {
+                'recipient_filter': EmailCampaign.RECIPIENT_ALL_USERS,
+                'subject': 'All users update',
+                'body_html': '<p>Hello</p>',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(
+            sorted(message.to[0] for message in mail.outbox),
+            [
+                'all-email-admin@example.com',
+                'email-user@example.com',
+                'student@example.com',
+            ],
+        )
+        unsubscribed = EmailSubscription.objects.get(
+            email='unsubscribed-user@example.com',
+        )
+        self.assertFalse(unsubscribed.is_active)
 
     def test_user_can_only_have_one_testimonial_and_can_edit_it(self):
         self.client.force_authenticate(user=self.user)

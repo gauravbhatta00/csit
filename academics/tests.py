@@ -12,6 +12,7 @@ from .models import (
     MockTestAnswer,
     MockTestQuestion,
     MockTestResult,
+    MockTestSession,
     Note,
     Question,
     Semester,
@@ -415,6 +416,182 @@ class AcademicApiTests(APITestCase):
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_response.data['total_marks'], 3)
         self.assertEqual(len(detail_response.data['answers']), 2)
+
+    def test_mock_test_start_creates_fresh_session_questions(self):
+        user = User.objects.create_user(username='session-tester', password='pass12345')
+        self.client.force_authenticate(user=user)
+        mock_test = MockTest.objects.create(subject=self.subject, title='Session test')
+        questions = [
+            MockTestQuestion.objects.create(
+                mock_test=mock_test,
+                question_text=f'Question {index}',
+                option_a='A',
+                option_b='B',
+                option_c='C',
+                option_d='D',
+                correct_option='A',
+                marks=1,
+            )
+            for index in range(4)
+        ]
+
+        first_response = self.client.post(
+            f'/api/mock-tests/{mock_test.id}/sessions/',
+            {'question_count': 2},
+            format='json',
+        )
+        second_response = self.client.post(
+            f'/api/mock-tests/{mock_test.id}/sessions/',
+            {'question_count': 2},
+            format='json',
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second_response.status_code, status.HTTP_201_CREATED)
+        first_ids = set(first_response.data['question_ids'])
+        second_ids = set(second_response.data['question_ids'])
+        self.assertEqual(len(first_ids), 2)
+        self.assertEqual(len(second_ids), 2)
+        self.assertTrue(first_ids.isdisjoint(second_ids))
+        self.assertEqual(MockTestSession.objects.filter(user=user).count(), 2)
+        self.assertTrue(first_ids | second_ids <= {question.id for question in questions})
+
+    def test_mock_test_retake_session_reuses_same_questions(self):
+        user = User.objects.create_user(username='retake-tester', password='pass12345')
+        self.client.force_authenticate(user=user)
+        mock_test = MockTest.objects.create(subject=self.subject, title='Retake test')
+        questions = [
+            MockTestQuestion.objects.create(
+                mock_test=mock_test,
+                question_text=f'Retake Question {index}',
+                option_a='A',
+                option_b='B',
+                option_c='C',
+                option_d='D',
+                correct_option='A',
+                marks=1,
+            )
+            for index in range(3)
+        ]
+        source_session = MockTestSession.objects.create(
+            user=user,
+            mock_test=mock_test,
+            question_ids=[questions[2].id, questions[0].id],
+            question_count=2,
+        )
+
+        response = self.client.post(
+            f'/api/mock-tests/{mock_test.id}/sessions/',
+            {
+                'question_count': 2,
+                'source_session_id': source_session.id,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['question_ids'], source_session.question_ids)
+        self.assertEqual(response.data['source_session'], source_session.id)
+
+    def test_mock_test_retake_result_without_count_reuses_full_session(self):
+        user = User.objects.create_user(username='retake-result-tester', password='pass12345')
+        self.client.force_authenticate(user=user)
+        mock_test = MockTest.objects.create(subject=self.subject, title='Retake result test')
+        questions = [
+            MockTestQuestion.objects.create(
+                mock_test=mock_test,
+                question_text=f'Result Retake Question {index}',
+                option_a='A',
+                option_b='B',
+                option_c='C',
+                option_d='D',
+                correct_option='A',
+                marks=1,
+            )
+            for index in range(4)
+        ]
+        source_session = MockTestSession.objects.create(
+            user=user,
+            mock_test=mock_test,
+            question_ids=[questions[3].id, questions[1].id, questions[0].id],
+            question_count=3,
+        )
+        result = MockTestResult.objects.create(
+            user=user,
+            mock_test=mock_test,
+            session=source_session,
+            score=0,
+            total_marks=3,
+        )
+
+        response = self.client.post(
+            f'/api/mock-tests/{mock_test.id}/sessions/',
+            {'source_result_id': result.id},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['question_ids'], source_session.question_ids)
+
+    def test_mock_test_session_submit_scores_and_blocks_duplicate_submission(self):
+        user = User.objects.create_user(username='session-submitter', password='pass12345')
+        self.client.force_authenticate(user=user)
+        mock_test = MockTest.objects.create(subject=self.subject, title='Session submit')
+        first_question = MockTestQuestion.objects.create(
+            mock_test=mock_test,
+            question_text='2 + 2?',
+            option_a='4',
+            option_b='3',
+            option_c='2',
+            option_d='1',
+            correct_option='A',
+            marks=1,
+        )
+        second_question = MockTestQuestion.objects.create(
+            mock_test=mock_test,
+            question_text='5 - 3?',
+            option_a='1',
+            option_b='2',
+            option_c='3',
+            option_d='4',
+            correct_option='B',
+            marks=2,
+        )
+        session = MockTestSession.objects.create(
+            user=user,
+            mock_test=mock_test,
+            question_ids=[second_question.id, first_question.id],
+            question_count=2,
+        )
+
+        response = self.client.post(
+            f'/api/mock-tests/{mock_test.id}/submit/',
+            {
+                'session_id': session.id,
+                'answers': {
+                    str(first_question.id): 'A',
+                    str(second_question.id): 'A',
+                },
+            },
+            format='json',
+        )
+        duplicate_response = self.client.post(
+            f'/api/mock-tests/{mock_test.id}/submit/',
+            {'session_id': session.id, 'answers': {}},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['score'], 1)
+        self.assertEqual(response.data['total_marks'], 3)
+        self.assertEqual(response.data['session_id'], session.id)
+        result = MockTestResult.objects.get(id=response.data['result_id'])
+        self.assertEqual(result.session, session)
+        self.assertEqual(
+            list(result.answers.order_by('id').values_list('question_id', flat=True)),
+            [second_question.id, first_question.id],
+        )
+        self.assertEqual(duplicate_response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_reply_creates_notification_for_discussion_owner(self):
         owner = User.objects.create_user(username='owner', password='pass12345')

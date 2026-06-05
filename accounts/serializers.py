@@ -13,13 +13,17 @@ from .models import (
     ContributionSubmission,
     CustomUser,
     DeviceToken,
+    EmailCampaign,
     EmailSubscription,
+    EmailTemplate,
     Notification,
     Testimonial,
 )
 from .services import (
     GoogleAuthConfigurationError,
     GoogleAuthError,
+    send_activation_email,
+    subscribe_email,
     verify_google_id_token,
 )
 
@@ -30,9 +34,20 @@ class CustomUserCreateSerializer(UserCreateSerializer):
         fields = ['id', 'username', 'email', 'password']
 
     def validate_email(self, value):
-        if value and CustomUser.objects.filter(email=value).exists():
+        value = (value or '').strip().lower()
+        if value and CustomUser.objects.filter(email__iexact=value).exists():
             raise serializers.ValidationError("This email is already registered.")
         return value
+
+    def create(self, validated_data):
+        user = super().create(validated_data)
+        user.is_active = False
+        user.account_status = CustomUser.STATUS_ACTIVE
+        user.active_token = None
+        user.save(update_fields=['is_active', 'account_status', 'active_token'])
+        subscribe_email(user.email, source='signup')
+        send_activation_email(user)
+        return user
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -215,6 +230,79 @@ class EmailSubscriptionSerializer(serializers.ModelSerializer):
 
     def validate_email(self, value):
         return value.strip().lower()
+
+
+class EmailTemplateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EmailTemplate
+        fields = [
+            'id',
+            'slug',
+            'name',
+            'subject',
+            'preheader',
+            'body_html',
+            'custom_css',
+            'is_system',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'is_system', 'created_at', 'updated_at']
+
+    def validate_slug(self, value):
+        return value.strip().lower()
+
+
+class AdminEmailCampaignSerializer(serializers.Serializer):
+    recipient_filter = serializers.ChoiceField(
+        choices=[
+            EmailCampaign.RECIPIENT_ACTIVE_SUBSCRIBERS,
+            EmailCampaign.RECIPIENT_ALL_USERS,
+        ],
+        default=EmailCampaign.RECIPIENT_ACTIVE_SUBSCRIBERS,
+    )
+    template_id = serializers.IntegerField(required=False)
+    template_slug = serializers.CharField(required=False, allow_blank=True)
+    subject = serializers.CharField(max_length=180, required=False, allow_blank=True)
+    preheader = serializers.CharField(max_length=220, required=False, allow_blank=True)
+    body_html = serializers.CharField(required=False, allow_blank=True)
+    custom_css = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        template = None
+        template_id = attrs.get('template_id')
+        template_slug = attrs.get('template_slug')
+
+        if template_id:
+            template = EmailTemplate.objects.filter(id=template_id).first()
+        elif template_slug:
+            template = EmailTemplate.objects.filter(slug=template_slug.strip().lower()).first()
+
+        if (template_id or template_slug) and not template:
+            raise serializers.ValidationError({'template_id': 'Template was not found.'})
+
+        subject = (attrs.get('subject') or (template.subject if template else '')).strip()
+        body_html = (attrs.get('body_html') or (template.body_html if template else '')).strip()
+
+        if not subject:
+            raise serializers.ValidationError({'subject': 'Subject is required.'})
+        if not body_html:
+            raise serializers.ValidationError({'body_html': 'Email body is required.'})
+
+        attrs['template'] = template
+        attrs['subject'] = subject
+        attrs['preheader'] = (
+            attrs.get('preheader')
+            if attrs.get('preheader') is not None
+            else (template.preheader if template else '')
+        ).strip()
+        attrs['body_html'] = body_html
+        attrs['custom_css'] = (
+            attrs.get('custom_css')
+            if attrs.get('custom_css') is not None
+            else (template.custom_css if template else '')
+        ).strip()
+        return attrs
 
 
 class TestimonialSerializer(serializers.ModelSerializer):

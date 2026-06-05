@@ -306,6 +306,11 @@ DEFAULT_FROM_EMAIL = os.environ.get(
     'DJANGO_DEFAULT_FROM_EMAIL',
     'Sabaiko CSIT <noreply@sabaikocsit.com>',
 )
+EMAIL_BRAND_NAME = os.environ.get('DJANGO_EMAIL_BRAND_NAME', 'Ramro CSIT')
+EMAIL_LOGO_URL = os.environ.get(
+    'DJANGO_EMAIL_LOGO_URL',
+    'https://www.ramrocsit.com/_next/image?url=%2Flogo.png&w=256&q=75',
+)
 CONTACT_EMAIL_RECIPIENT = os.environ.get('CONTACT_EMAIL_RECIPIENT', 'hi@ramrocsit.com')
 CONTACT_EMAIL_FROM = os.environ.get('CONTACT_EMAIL_FROM', CONTACT_EMAIL_RECIPIENT)
 

@@ -313,6 +313,38 @@ class MockTestQuestion(models.Model):
         return self.question_text[:50]
 
 
+class MockTestSession(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='mock_test_sessions',
+    )
+    mock_test = models.ForeignKey(
+        MockTest,
+        on_delete=models.CASCADE,
+        related_name='sessions',
+    )
+    question_ids = models.JSONField(default=list)
+    question_count = models.PositiveIntegerField(default=0)
+    source_session = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='retake_sessions',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'mock_test', 'created_at'], name='mock_session_user_test_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.user.username} - {self.mock_test.title} - {self.question_count} questions"
+
+
 class MockTestResult(models.Model):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -320,6 +352,13 @@ class MockTestResult(models.Model):
         related_name='test_results',
     )
     mock_test = models.ForeignKey(MockTest, on_delete=models.CASCADE, related_name='results')
+    session = models.OneToOneField(
+        MockTestSession,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='result',
+    )
     score = models.PositiveIntegerField(default=0)
     total_marks = models.PositiveIntegerField()
     completed_at = models.DateTimeField(auto_now_add=True)

@@ -9,6 +9,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
 from django.core.files.storage import default_storage
 from django.core.mail import send_mail
+from django.http import HttpResponse
 from PIL import Image, UnidentifiedImageError
 from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView
@@ -52,17 +53,21 @@ from .models import (
     ContactMessage,
     ContributionSubmission,
     DeviceToken,
+    EmailCampaign,
     EmailSubscription,
+    EmailTemplate,
     Notification,
     Testimonial,
 )
 from .serializers import (
+    AdminEmailCampaignSerializer,
     ContactMessageSerializer,
     ContributionSubmissionSerializer,
     ChangePasswordSerializer,
     DeleteAccountSerializer,
     DeviceTokenSerializer,
     EmailSubscriptionSerializer,
+    EmailTemplateSerializer,
     GoogleLoginSerializer,
     NotificationSerializer,
     PasswordResetConfirmSerializer,
@@ -74,7 +79,12 @@ from .serializers import (
 from .services import (
     GoogleAuthConfigurationError,
     build_login_response,
+    build_unsubscribe_url,
     build_unique_username,
+    ensure_default_email_templates,
+    render_template_placeholders,
+    send_html_email,
+    subscribe_email,
 )
 
 
@@ -480,6 +490,42 @@ class PasswordResetConfirmView(APIView):
         return Response({'detail': 'Password has been reset.'})
 
 
+class AccountActivationView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        uid = request.data.get('uid')
+        token = request.data.get('token')
+        User = get_user_model()
+
+        try:
+            user_id = force_str(urlsafe_base64_decode(uid))
+            user = User.objects.get(pk=user_id)
+        except (TypeError, ValueError, OverflowError, User.DoesNotExist):
+            return Response({'detail': 'Activation link is invalid.'}, status=400)
+
+        if not default_token_generator.check_token(user, token):
+            return Response(
+                {'detail': 'Activation link is invalid or expired.'},
+                status=400,
+            )
+
+        if user.account_status != User.STATUS_ACTIVE:
+            return Response({'detail': user.account_unavailable_message()}, status=400)
+
+        update_fields = []
+        if not user.is_active:
+            user.is_active = True
+            update_fields.append('is_active')
+        if user.active_token:
+            user.active_token = None
+            update_fields.append('active_token')
+        if update_fields:
+            user.save(update_fields=update_fields)
+        subscribe_email(user.email, source='activation')
+        return Response({'detail': 'Account activated. You can now log in.'})
+
+
 class GoogleLoginView(APIView):
     permission_classes = [AllowAny]
 
@@ -539,6 +585,7 @@ class GoogleLoginView(APIView):
         user = User.objects.create_user(password=None, **create_kwargs)
         user.set_unusable_password()
         user.save(update_fields=['password'])
+        subscribe_email(user.email, source='google_signup')
         return user
 
 
@@ -622,14 +669,194 @@ class EmailSubscriptionCreateView(APIView):
     def post(self, request):
         serializer = EmailSubscriptionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        subscription, created = EmailSubscription.objects.update_or_create(
-            email=serializer.validated_data['email'],
-            defaults={'is_active': True},
-        )
-        status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        email = serializer.validated_data['email']
+        existing = EmailSubscription.objects.filter(email__iexact=email).exists()
+        subscription = subscribe_email(email, source='manual')
+        status_code = status.HTTP_200_OK if existing else status.HTTP_201_CREATED
         return Response(
             EmailSubscriptionSerializer(subscription).data,
             status=status_code,
+        )
+
+
+class EmailSubscriptionUnsubscribeView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        token = request.data.get('token')
+        return self.unsubscribe(token, wants_html=False)
+
+    def get(self, request, token):
+        return self.unsubscribe(token, wants_html=True)
+
+    def unsubscribe(self, token, wants_html=False):
+        try:
+            token = uuid.UUID(str(token))
+        except (TypeError, ValueError):
+            token = None
+
+        subscription = EmailSubscription.objects.filter(
+            unsubscribe_token=token,
+        ).first()
+        if not subscription:
+            if wants_html:
+                return HttpResponse(
+                    '<h1>Unsubscribe link not found</h1>'
+                    '<p>This link is invalid or has already been replaced.</p>',
+                    status=404,
+                )
+            return Response({'detail': 'Unsubscribe link was not found.'}, status=404)
+
+        if subscription.is_active:
+            subscription.is_active = False
+            subscription.save(update_fields=['is_active', 'updated_at'])
+
+        if wants_html:
+            return HttpResponse(
+                '<h1>You are unsubscribed</h1>'
+                '<p>You will no longer receive Ramro CSIT email updates.</p>'
+            )
+        return Response({'detail': 'You have been unsubscribed.'})
+
+
+class AdminEmailTemplateListView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        ensure_default_email_templates()
+        templates = EmailTemplate.objects.all()
+        return Response(EmailTemplateSerializer(templates, many=True).data)
+
+    def post(self, request):
+        serializer = EmailTemplateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        template = serializer.save(is_system=False)
+        return Response(EmailTemplateSerializer(template).data, status=201)
+
+
+class AdminEmailTemplateDetailView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def patch(self, request, pk):
+        template = get_object_or_404(EmailTemplate, pk=pk)
+        serializer = EmailTemplateSerializer(template, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        template = serializer.save()
+        return Response(EmailTemplateSerializer(template).data)
+
+    def delete(self, request, pk):
+        template = get_object_or_404(EmailTemplate, pk=pk)
+        if template.is_system:
+            return Response(
+                {'detail': 'System templates cannot be deleted.'},
+                status=400,
+            )
+        template.delete()
+        return Response(status=204)
+
+
+class AdminEmailCampaignView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        campaigns = EmailCampaign.objects.select_related('template', 'sent_by')[:100]
+        return Response([
+            {
+                'id': campaign.id,
+                'template_id': campaign.template_id,
+                'template_name': campaign.template.name if campaign.template else '',
+                'subject': campaign.subject,
+                'preheader': campaign.preheader,
+                'recipient_filter': campaign.recipient_filter,
+                'sent_count': campaign.sent_count,
+                'failed_count': campaign.failed_count,
+                'sent_by': campaign.sent_by.username if campaign.sent_by else '',
+                'created_at': campaign.created_at,
+            }
+            for campaign in campaigns
+        ])
+
+    def post(self, request):
+        serializer = AdminEmailCampaignSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        recipient_filter = data['recipient_filter']
+        subscriptions_by_email = {}
+
+        if recipient_filter == EmailCampaign.RECIPIENT_ACTIVE_SUBSCRIBERS:
+            subscriptions = EmailSubscription.objects.filter(is_active=True)
+        else:
+            User = get_user_model()
+            for email in User.objects.exclude(email='').values_list('email', flat=True):
+                normalized_email = str(email or '').strip().lower()
+                if not normalized_email:
+                    continue
+                subscription, _ = EmailSubscription.objects.get_or_create(
+                    email=normalized_email,
+                    defaults={
+                        'is_active': True,
+                        'source': 'admin_backfill',
+                    },
+                )
+                if subscription and subscription.is_active:
+                    subscriptions_by_email[subscription.email] = subscription
+            subscriptions = subscriptions_by_email.values()
+
+        recipients = []
+        seen = set()
+        for subscription in subscriptions:
+            email = subscription.email.lower()
+            if subscription.is_active and email not in seen:
+                recipients.append(subscription)
+                seen.add(email)
+
+        if not recipients:
+            return Response({'detail': 'No active email subscribers were found.'}, status=400)
+
+        sent_count = 0
+        failed_count = 0
+
+        for subscription in recipients:
+            unsubscribe_url = build_unsubscribe_url(subscription)
+            subject = render_template_placeholders(data['subject'], subscription)
+            body_html = render_template_placeholders(data['body_html'], subscription)
+            preheader = render_template_placeholders(data['preheader'], subscription)
+            custom_css = render_template_placeholders(data['custom_css'], subscription)
+            try:
+                send_html_email(
+                    subject=subject,
+                    body_html=body_html,
+                    recipients=[subscription.email],
+                    preheader=preheader,
+                    custom_css=custom_css,
+                    unsubscribe_url=unsubscribe_url,
+                )
+                sent_count += 1
+            except Exception:
+                failed_count += 1
+                logger.exception(
+                    'Failed to send email campaign to subscription_id=%s',
+                    subscription.id,
+                )
+
+        campaign = EmailCampaign.objects.create(
+            template=data.get('template'),
+            subject=data['subject'],
+            preheader=data['preheader'],
+            body_html=data['body_html'],
+            custom_css=data['custom_css'],
+            recipient_filter=recipient_filter,
+            sent_count=sent_count,
+            failed_count=failed_count,
+            sent_by=request.user,
+        )
+        return Response(
+            {
+                'id': campaign.id,
+                'sent_count': sent_count,
+                'failed_count': failed_count,
+            },
+            status=201,
         )
 
 

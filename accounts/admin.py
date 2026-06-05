@@ -5,7 +5,9 @@ from .models import (
     ContributionSubmission,
     CustomUser,
     DeviceToken,
+    EmailCampaign,
     EmailSubscription,
+    EmailTemplate,
     Notification,
     Testimonial,
 )
@@ -68,12 +70,36 @@ class ContributionSubmissionAdmin(admin.ModelAdmin):
 
 @admin.register(EmailSubscription)
 class EmailSubscriptionAdmin(admin.ModelAdmin):
-    list_display = ['email', 'is_active', 'created_at', 'updated_at']
-    list_filter = ['is_active']
+    list_display = ['email', 'is_active', 'source', 'created_at', 'updated_at']
+    list_filter = ['is_active', 'source']
     search_fields = ['email']
     list_editable = ['is_active']
-    readonly_fields = ['created_at', 'updated_at']
+    readonly_fields = ['unsubscribe_token', 'created_at', 'updated_at']
     date_hierarchy = 'created_at'
+
+
+@admin.register(EmailTemplate)
+class EmailTemplateAdmin(admin.ModelAdmin):
+    list_display = ['name', 'slug', 'subject', 'is_system', 'updated_at']
+    list_filter = ['is_system']
+    search_fields = ['name', 'slug', 'subject', 'body_html']
+    prepopulated_fields = {'slug': ('name',)}
+    readonly_fields = ['created_at', 'updated_at']
+
+
+@admin.register(EmailCampaign)
+class EmailCampaignAdmin(admin.ModelAdmin):
+    list_display = [
+        'subject',
+        'recipient_filter',
+        'sent_count',
+        'failed_count',
+        'sent_by',
+        'created_at',
+    ]
+    list_filter = ['recipient_filter', 'created_at']
+    search_fields = ['subject', 'body_html', 'sent_by__username']
+    readonly_fields = ['created_at']
 
 
 @admin.register(Testimonial)
