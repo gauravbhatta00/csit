@@ -445,11 +445,23 @@ class MockTestListSerializer(serializers.ModelSerializer):
 
 class MockTestResultSerializer(serializers.ModelSerializer):
     mock_test_title = serializers.CharField(source='mock_test.title', read_only=True)
+    subject_slug = serializers.CharField(source='mock_test.subject.slug', read_only=True)
+    semester_slug = serializers.CharField(source='mock_test.subject.semester.slug', read_only=True)
     session = serializers.IntegerField(source='session_id', read_only=True)
 
     class Meta:
         model = MockTestResult
-        fields = ['id', 'mock_test', 'mock_test_title', 'session', 'score', 'total_marks', 'completed_at']
+        fields = [
+            'id',
+            'mock_test',
+            'mock_test_title',
+            'subject_slug',
+            'semester_slug',
+            'session',
+            'score',
+            'total_marks',
+            'completed_at',
+        ]
 
 
 class MockTestAnswerReviewSerializer(serializers.ModelSerializer):
