@@ -60,6 +60,7 @@ from .models import (
     Testimonial,
 )
 from .serializers import (
+    ActivationResendSerializer,
     AdminEmailCampaignSerializer,
     ContactMessageSerializer,
     ContributionSubmissionSerializer,
@@ -83,6 +84,7 @@ from .services import (
     build_unique_username,
     ensure_default_email_templates,
     render_template_placeholders,
+    send_activation_email,
     send_html_email,
     subscribe_email,
 )
@@ -524,6 +526,38 @@ class AccountActivationView(APIView):
             user.save(update_fields=update_fields)
         subscribe_email(user.email, source='activation')
         return Response({'detail': 'Account activated. You can now log in.'})
+
+
+class ActivationResendView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = ActivationResendSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data['email']
+        User = get_user_model()
+        user = User.objects.filter(email__iexact=email).first()
+
+        generic_response = {
+            'detail': (
+                'If an inactive account exists for that email, '
+                'a new activation link has been sent.'
+            )
+        }
+
+        if not user or user.is_active or user.account_status != User.STATUS_ACTIVE:
+            return Response(generic_response)
+
+        try:
+            send_activation_email(user)
+        except Exception:
+            logger.exception('Failed to resend activation email to user_id=%s', user.id)
+            return Response(
+                {'detail': 'Activation email could not be sent. Try again later.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        return Response(generic_response)
 
 
 class GoogleLoginView(APIView):

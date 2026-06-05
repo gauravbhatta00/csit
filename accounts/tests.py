@@ -124,6 +124,52 @@ class AuthApiTests(APITestCase):
         )
         self.assertEqual(login_response.status_code, status.HTTP_200_OK)
 
+    @override_settings(
+        EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
+        FRONTEND_BASE_URL='http://localhost:3000',
+    )
+    def test_inactive_user_can_request_new_activation_email(self):
+        user = User.objects.create_user(
+            username='inactive',
+            email='inactive@example.com',
+            password='pass12345',
+        )
+        user.is_active = False
+        user.save(update_fields=['is_active'])
+
+        response = self.client.post(
+            '/api/accounts/activation/resend/',
+            {'email': 'Inactive@example.com'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn('Activate your Ramro CSIT account', mail.outbox[0].subject)
+        activation_html = mail.outbox[0].alternatives[0][0]
+        self.assertIn('http://localhost:3000/activate-account?', activation_html)
+
+    def test_signup_email_failure_rolls_back_user_creation(self):
+        self.client.raise_request_exception = False
+
+        with patch(
+            'accounts.serializers.send_activation_email',
+            side_effect=RuntimeError('SMTP failed'),
+        ):
+            response = self.client.post(
+                '/api/accounts/users/',
+                {
+                    'username': 'mailfail',
+                    'email': 'mailfail@example.com',
+                    'password': 'pass12345',
+                },
+                format='json',
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertFalse(User.objects.filter(username='mailfail').exists())
+        self.assertFalse(EmailSubscription.objects.filter(email='mailfail@example.com').exists())
+
     def test_suspended_user_login_returns_remaining_days_message(self):
         self.user.set_account_status(
             User.STATUS_SUSPENDED,

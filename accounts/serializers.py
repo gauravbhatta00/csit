@@ -1,5 +1,6 @@
 from djoser.serializers import UserCreateSerializer
 from django.contrib.auth.password_validation import validate_password
+from django.db import transaction
 from rest_framework import serializers
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.serializers import (
@@ -23,7 +24,6 @@ from .services import (
     GoogleAuthConfigurationError,
     GoogleAuthError,
     send_activation_email,
-    subscribe_email,
     verify_google_id_token,
 )
 
@@ -40,14 +40,14 @@ class CustomUserCreateSerializer(UserCreateSerializer):
         return value
 
     def create(self, validated_data):
-        user = super().create(validated_data)
-        user.is_active = False
-        user.account_status = CustomUser.STATUS_ACTIVE
-        user.active_token = None
-        user.save(update_fields=['is_active', 'account_status', 'active_token'])
-        subscribe_email(user.email, source='signup')
-        send_activation_email(user)
-        return user
+        with transaction.atomic():
+            user = super().create(validated_data)
+            user.is_active = False
+            user.account_status = CustomUser.STATUS_ACTIVE
+            user.active_token = None
+            user.save(update_fields=['is_active', 'account_status', 'active_token'])
+            send_activation_email(user)
+            return user
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -359,6 +359,13 @@ class TestimonialSerializer(serializers.ModelSerializer):
 
 
 class PasswordResetRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+    def validate_email(self, value):
+        return value.strip().lower()
+
+
+class ActivationResendSerializer(serializers.Serializer):
     email = serializers.EmailField()
 
     def validate_email(self, value):

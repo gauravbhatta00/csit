@@ -294,7 +294,11 @@ GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '')
 GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET', '')
 EMAIL_BACKEND = os.environ.get(
     'DJANGO_EMAIL_BACKEND',
-    'django.core.mail.backends.console.EmailBackend',
+    (
+        'django.core.mail.backends.console.EmailBackend'
+        if DEBUG
+        else 'django.core.mail.backends.smtp.EmailBackend'
+    ),
 )
 EMAIL_HOST = os.environ.get('DJANGO_EMAIL_HOST', 'smtp.zoho.com')
 EMAIL_PORT = env_int('DJANGO_EMAIL_PORT', 587)
@@ -313,6 +317,22 @@ EMAIL_LOGO_URL = os.environ.get(
 )
 CONTACT_EMAIL_RECIPIENT = os.environ.get('CONTACT_EMAIL_RECIPIENT', 'hi@ramrocsit.com')
 CONTACT_EMAIL_FROM = os.environ.get('CONTACT_EMAIL_FROM', CONTACT_EMAIL_RECIPIENT)
+
+if not DEBUG and EMAIL_BACKEND == 'django.core.mail.backends.smtp.EmailBackend':
+    missing_email_settings = [
+        name for name, value in {
+            'DJANGO_EMAIL_HOST': EMAIL_HOST,
+            'DJANGO_EMAIL_HOST_USER': EMAIL_HOST_USER,
+            'DJANGO_EMAIL_HOST_PASSWORD': EMAIL_HOST_PASSWORD,
+            'DJANGO_DEFAULT_FROM_EMAIL': DEFAULT_FROM_EMAIL,
+        }.items()
+        if not value
+    ]
+    if missing_email_settings:
+        raise ImproperlyConfigured(
+            'Missing SMTP email settings: '
+            + ', '.join(missing_email_settings)
+        )
 
 CSRF_TRUSTED_ORIGINS = env_list('DJANGO_CSRF_TRUSTED_ORIGINS')
 CORS_ALLOWED_ORIGINS = env_list('DJANGO_CORS_ALLOWED_ORIGINS')
