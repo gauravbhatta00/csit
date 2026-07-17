@@ -1283,20 +1283,75 @@ class AdminDiscussionDetailView(APIView):
 class AdminNotificationListView(APIView):
     permission_classes = [IsAdminUser]
 
+    @staticmethod
+    def serialize_notification(notification):
+        return {
+            'id': notification.id,
+            'username': notification.user.username,
+            'type': notification.type,
+            'message': notification.message,
+            'link_path': notification.link_path,
+            'is_read': notification.is_read,
+            'created_at': notification.created_at,
+        }
+
     def get(self, request):
         notifications = Notification.objects.select_related('user').order_by('-created_at')[:250]
-        return Response([
-            {
-                'id': notification.id,
-                'username': notification.user.username,
-                'type': notification.type,
-                'message': notification.message,
-                'link_path': notification.link_path,
-                'is_read': notification.is_read,
-                'created_at': notification.created_at,
-            }
-            for notification in notifications
+        return Response([self.serialize_notification(item) for item in notifications])
+
+    def post(self, request):
+        recipient = request.data.get('recipient')
+        message = (request.data.get('message') or '').strip()
+        link_path = (request.data.get('link_path') or '').strip()
+
+        if not message:
+            return Response({'detail': 'Message is required.'}, status=400)
+        if link_path and not link_path.startswith('/'):
+            return Response({'detail': 'Link path must start with /.'}, status=400)
+
+        User = get_user_model()
+        # Keep the established "all" recipient value for API compatibility,
+        # but require a semester so "all" means all eligible students in it.
+        if recipient in ('all', 'semester'):
+            if not request.data.get('semester_id'):
+                return Response({'detail': 'Semester is required.'}, status=400)
+            semester = get_object_or_404(Semester, pk=request.data.get('semester_id'))
+            users = User.objects.filter(
+                is_active=True,
+                is_staff=False,
+                semester__iexact=semester.name,
+            )
+        elif recipient == 'user':
+            users = User.objects.filter(
+                pk=request.data.get('user_id'),
+                is_active=True,
+                is_staff=False,
+            )
+            if not users.exists():
+                return Response({'detail': 'Active student was not found.'}, status=404)
+        else:
+            return Response(
+                {'detail': 'Recipient must be all or user.'},
+                status=400,
+            )
+
+        created = Notification.objects.bulk_create([
+            Notification(
+                user=user,
+                type=Notification.TYPE_GENERAL,
+                message=message,
+                link_path=link_path,
+            )
+            for user in users
         ])
+        created = Notification.objects.filter(
+            pk__in=[notification.pk for notification in created]
+        ).select_related('user')
+        serialized = [self.serialize_notification(item) for item in created]
+        return Response(
+            {'sent_count': len(serialized), 'notifications': serialized},
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class AdminNotificationDetailView(APIView):

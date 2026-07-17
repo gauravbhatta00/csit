@@ -224,6 +224,7 @@ class EmailSubscription(models.Model):
 
 
 class Notification(models.Model):
+    TYPE_GENERAL = 'general'
     TYPE_REPLY = 'reply'
     TYPE_PAPER = 'paper'
     TYPE_MOCK_TEST = 'mock_test'
@@ -231,6 +232,7 @@ class Notification(models.Model):
     TYPE_PAYMENT = 'payment'
 
     TYPE_CHOICES = [
+        (TYPE_GENERAL, 'General'),
         (TYPE_REPLY, 'Discussion Reply'),
         (TYPE_PAPER, 'New Question Paper'),
         (TYPE_MOCK_TEST, 'New Mock Test'),

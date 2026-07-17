@@ -12,7 +12,7 @@ from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import AccessToken
 
 from academics.models import AnswerContribution, Question, Semester, Subject, Year
-from .models import ContactMessage, EmailSubscription
+from .models import ContactMessage, EmailSubscription, Notification
 
 User = get_user_model()
 
@@ -88,6 +88,43 @@ class AuthApiTests(APITestCase):
         self.assertIn('totals', response.data)
         self.assertIn('timeline', response.data)
         self.assertEqual(response.data['totals']['users'], 2)
+
+    def test_admin_notification_only_targets_students_in_selected_semester(self):
+        staff = User.objects.create_user(
+            username='staff', password='pass12345', is_staff=True,
+            semester='First Semester',
+        )
+        matching_student = User.objects.create_user(
+            username='first-semester-student', password='pass12345',
+            semester='first semester',
+        )
+        other_student = User.objects.create_user(
+            username='second-semester-student', password='pass12345',
+            semester='Second Semester',
+        )
+        inactive_student = User.objects.create_user(
+            username='inactive-student', password='pass12345',
+            semester='First Semester', is_active=False,
+        )
+        semester = Semester.objects.create(name='First Semester')
+        self.client.force_authenticate(user=staff)
+
+        response = self.client.post(
+            '/api/accounts/admin/notifications/',
+            {
+                'recipient': 'all',
+                'semester_id': semester.id,
+                'message': 'Your semester timetable is available.',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['sent_count'], 1)
+        self.assertTrue(Notification.objects.filter(user=matching_student).exists())
+        self.assertFalse(Notification.objects.filter(user=other_student).exists())
+        self.assertFalse(Notification.objects.filter(user=inactive_student).exists())
+        self.assertFalse(Notification.objects.filter(user=staff).exists())
 
     def test_admin_semester_and_subject_lists_require_staff_user(self):
         self.client.force_authenticate(user=self.user)
